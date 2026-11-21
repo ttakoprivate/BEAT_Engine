@@ -305,3 +305,34 @@ end
     end
     @test_throws ArgumentError SD.adopt_square_storage(Ptr{Cvoid}(1), 5, 4)
 end
+
+@testset "a-posteriori error estimate tracks the true solver error" begin
+    setprecision(BigFloat, 160) do
+        for condition in (1e3, 1e6, 1e8)
+            rng = MersenneTwister(21)
+            f = split_fixture(rng, 100, 8; condition)
+            dense = dense_build(f)
+            rhs = randn(rng, ComplexF64, f.n, 3)
+            exact = Complex{BigFloat}.(dense) \ Complex{BigFloat}.(rhs)
+            for factorization in (SD.SplitRefinedLU(split_build(f)), SD.RefinedDenseLU(copy(dense)))
+                solution = factorization \ rhs
+                truth = [Float64(maximum(abs, solution[:, j] - exact[:, j]) / maximum(abs, exact[:, j])) for j in 1:3]
+                estimate = factorization.estimated_error
+                @test length(estimate) == 3 && all(isfinite, estimate)
+                # within a factor 10 of the true error on every path (refined, GMRES-IR, Float64 fallback)
+                @test all(0.1 .<= estimate ./ max.(truth, floatmin()) .<= 10)
+                diagnostics = SD.dense_solver_diagnostics((factorization=factorization,))
+                @test diagnostics["dense_estimated_relative_error"] == maximum(estimate)
+                @test diagnostics["dense_estimated_relative_error_per_excitation"] == estimate
+            end
+        end
+    end
+    withenv("BLAB_DENSE_ERROR_ESTIMATE" => "0") do
+        rng = MersenneTwister(1)
+        f = split_fixture(rng, 60, 4)
+        factorization = SD.SplitRefinedLU(split_build(f))
+        factorization \ randn(rng, ComplexF64, f.n, 2)
+        @test isempty(factorization.estimated_error)
+        @test SD.dense_solver_diagnostics((factorization=factorization,))["dense_estimated_relative_error"] === nothing
+    end
+end

@@ -54,6 +54,15 @@ end
 _dense_gmres_ir_enabled() = lowercase(strip(get(ENV, "BLAB_COUPLED_DENSE_GMRES_IR", "1"))) in ("1", "on", "true", "auto")
 
 const SPLIT_REFINEMENT_MAX_ITERATIONS = 10       # as DENSE_REFINEMENT_MAX_ITERATIONS
+
+# A-posteriori solver-error estimate after an accepted solve: one more correction d = LU⁻¹ r from the
+# final Float64 residual (one triangular solve, no extra matrix product). d approximates x_exact - x
+# for the assembled system, so max|d|/max|x| per column estimates the solver's relative error; it
+# does not include discretization error. The solution is not changed. BLAB_DENSE_ERROR_ESTIMATE=0 skips it.
+_dense_error_estimate_enabled() = !(lowercase(strip(get(ENV, "BLAB_DENSE_ERROR_ESTIMATE", "1"))) in ("0", "off", "false"))
+_relative_column_errors(correction, solution) =
+    [norm(view(correction, :, column), Inf) / max(norm(view(solution, :, column), Inf), floatmin(Float64))
+     for column in axes(solution, 2)]
 const DENSE_GMRES_IR_RESTART = 30
 const DENSE_GMRES_IR_MAX_CYCLES = 10
 const DENSE_SPLIT_PANEL_BYTES = 256 * 1024^2     # ComplexF64 panel used by the residual product
@@ -389,6 +398,7 @@ mutable struct SplitRefinedLU
     gmres_iterations::Int
     fallback_reason::Union{Nothing,String}
     backward_error::Float64
+    estimated_error::Vector{Float64}          # per column of the last solve, see _relative_column_errors
     spill_path::Union{Nothing,String}
     # A factor held elsewhere (the CUDA LU on the device): `device_solve(x::Matrix{ComplexF32})`
     # returns the ComplexF64 host solution, `release_device()` frees it. `factor` is then nothing.
@@ -409,7 +419,7 @@ function SplitRefinedLU(matrix::SplitDenseMatrix)
     spill_directory = _dense_spill_target(n)
     matrix_norm = _split_opnorm_inf(matrix.hi, matrix)
     store, spill_path = isnothing(spill_directory) ? (matrix.hi, nothing) : _split_spill(matrix.hi, spill_directory)
-    refined = SplitRefinedLU(matrix, store, matrix_norm, nothing, nothing, 0, 0, nothing, NaN, spill_path,
+    refined = SplitRefinedLU(matrix, store, matrix_norm, nothing, nothing, 0, 0, nothing, NaN, Float64[], spill_path,
                              nothing, nothing)
     if matrix.overflow
         _split_fall_back!(refined, "an entry is outside the Float32 range")
@@ -442,7 +452,7 @@ function SplitRefinedLU(matrix::SplitDenseMatrix, device_solve::Function, releas
     matrix_norm = _split_opnorm_inf(matrix.hi, matrix)
     store, spill_path = isnothing(spill_directory) ? (matrix.hi, nothing) : _split_spill(matrix.hi, spill_directory)
     isnothing(spill_path) || (matrix.hi = Matrix{ComplexF32}(undef, 0, 0))
-    return SplitRefinedLU(matrix, store, matrix_norm, nothing, nothing, 0, 0, nothing, NaN,
+    return SplitRefinedLU(matrix, store, matrix_norm, nothing, nothing, 0, 0, nothing, NaN, Float64[],
                           spill_path, device_solve, release_device)
 end
 
@@ -529,6 +539,22 @@ end
 
 function _split_solve_columns(factorization::SplitRefinedLU, target::Matrix{ComplexF64})
     residual = similar(target)
+    solution = _split_solve_columns!(factorization, target, residual)
+    factorization.estimated_error = _dense_error_estimate_enabled() ?
+        _split_estimate_errors(factorization, target, solution, residual) : Float64[]
+    return solution
+end
+
+# `residual` holds the final residual on every exit of _split_solve_columns! except GMRES-IR,
+# which is recomputed here (rare path).
+function _split_estimate_errors(factorization::SplitRefinedLU, target, solution, residual)
+    factorization.gmres_iterations > 0 && _split_residual!(residual, factorization, target, solution)
+    correction = isnothing(factorization.fallback) ? _split_precondition(factorization, residual) :
+                 factorization.fallback \ residual
+    return _relative_column_errors(correction, solution)
+end
+
+function _split_solve_columns!(factorization::SplitRefinedLU, target::Matrix{ComplexF64}, residual)
     if isnothing(factorization.fallback)
         solution = _split_precondition(factorization, target)
         previous = Inf
