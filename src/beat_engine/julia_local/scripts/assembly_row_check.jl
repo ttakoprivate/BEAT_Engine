@@ -182,6 +182,7 @@ function row_check(mix, full, x_mix, x_64; label, sizes=(16, 64, 256), seeds=1:2
         names = vcat(["current", "velocity"], worst === nothing ? String[] : ["p_bem[worst]"], ["p_bem[1]", "p_bem[mid]"])
         G = zeros(ComplexF64, n, length(outputs))
         for (k, i) in enumerate(outputs); G[i, k] = 1; end
+        # column label: all(F32) = productive Float32 factor, all(fb64) = productive Float64 fallback LU
         Z = eltype(factor32) == ComplexF32 ? ComplexF64.(factor32' \ ComplexF32.(G)) :   # productive Float32 factor
             factor32' \ G                                                              # or its Float64 fallback
         Z64 = factor64' \ G
@@ -193,7 +194,7 @@ function row_check(mix, full, x_mix, x_64; label, sizes=(16, 64, 256), seeds=1:2
         linear64 = vec(sum(conj.(Z64) .* r_asm; dims=1))         # all rows, Float64 adjoint
         head64 = vec(sum(conj.(Z[small, :]) .* r_asm[small]; dims=1)) .+
                  (length(bem) / length(head)) .* vec(sum(conj.(Z[head, :]) .* r_asm[head]; dims=1))
-        @printf("  %-13s %10s %10s %10s", "output", "|truth|", "all(F32)", "all(F64)")
+        @printf("  %-13s %10s %10s %10s", "output", "|truth|", eltype(factor32) == ComplexF32 ? "all(F32)" : "all(fb64)", "all(F64)")
         for s in sizes; @printf(" %24s", "s=$s med [min,max]"); end
         @printf(" %9s %32s\n", "first64", "importance E[s]=64 med [min,max]")
         for k in axes(G, 2)
