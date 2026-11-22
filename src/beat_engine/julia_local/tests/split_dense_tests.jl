@@ -384,6 +384,23 @@ end
         parsed = JSON.parse(JSON.json(SD.dense_solver_diagnostics((factorization=factorization,))))
         @test all(e -> e === nothing || isfinite(e), parsed["dense_estimated_relative_error_per_excitation"])
     end
+    # review 3: a vanished solution (x = 0 for b = floatmin) must not report error 0
+    for bval in (floatmin(Float64), 2.0^-1024)
+        for factorization in (SD.SplitRefinedLU(split_of(reshape(ComplexF64[1], 1, 1))), SD.RefinedDenseLU(reshape(ComplexF64[1], 1, 1)))
+            x = factorization \ ComplexF64[bval]
+            parsed = JSON.parse(JSON.json(SD.dense_solver_diagnostics((factorization=factorization,))))
+            if iszero(x[1])
+                @test parsed["dense_estimated_relative_error_per_excitation"][1] == 1.0
+                @test parsed["dense_estimate_direction_check_passed"] === false
+            else
+                @test parsed["dense_estimated_relative_error_per_excitation"][1] <= 1e-15
+            end
+        end
+    end
+    for factorization in (SD.SplitRefinedLU(split_of(reshape(ComplexF64[1], 1, 1))), SD.RefinedDenseLU(reshape(ComplexF64[1], 1, 1)))
+        x = factorization \ ComplexF64[2.0^-1021]       # control: solved exactly
+        @test x[1] == 2.0^-1021 && factorization.estimated_error[1] == 0 && factorization.estimate_direction_check[1]
+    end
     # review 2, case 2: a decoupled third equation hides the shifted pivot of the first two from the
     # direction check (estimate 384x too small). Known limitation of the heuristic, documented in
     # _dense_error_estimate; a factorization-based safeguard is needed before automatic decisions.

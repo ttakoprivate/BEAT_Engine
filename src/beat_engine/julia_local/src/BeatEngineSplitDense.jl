@@ -66,7 +66,9 @@ const SPLIT_REFINEMENT_MAX_ITERATIONS = 10       # as DENSE_REFINEMENT_MAX_ITERA
 # automatic decisions (e.g. skipping a Float64 recompute); that needs a factorization-based safeguard.
 # Residual columns are scaled by a power of two chosen so that d is O(1) in the Float32 solve, so
 # tiny or huge excitations neither underflow nor overflow; a non-finite estimate is stored as NaN,
-# reported as `nothing` (JSON null) and fails the check.
+# reported as `nothing` (JSON null) and fails the check. A solution that vanished for a non-zero
+# excitation reports the exact relative error 1; a correction that underflowed although the residual
+# does not vanish reports `nothing`; a residual of at least half the right-hand side fails the check.
 # Cost: one matrix product and two solves with the existing factor.
 # Scope: solver error for the assembled system, not discretization or assembly error.
 # BLAB_DENSE_ERROR_ESTIMATE=0 skips it.
@@ -93,12 +95,23 @@ function _dense_error_estimate(apply, multiply, solution::AbstractMatrix, residu
     w = apply(multiply(d))
     estimates = Float64[]; passed = Bool[]
     for j in axes(solution, 2)
+        rn = norm(view(residual, :, j), Inf); bn = norm(view(target, :, j), Inf)
+        xn = norm(view(solution, :, j), Inf)
+        if iszero(xn) && !iszero(bn)
+            # the solution vanished for a non-zero excitation: the relative error is exactly 1
+            push!(estimates, 1.0); push!(passed, false); continue
+        end
         e = norm(view(d, :, j), Inf)
+        if iszero(e) && !iszero(rn)
+            # the correction underflowed although the residual does not vanish: unknown
+            push!(estimates, NaN); push!(passed, false); continue
+        end
         rho = iszero(e) ? 0.0 : norm(view(w, :, j) - view(d, :, j), Inf) / e
-        x = max(norm(view(solution, :, j), Inf), floatmin(Float64))
+        x = max(xn, floatmin(Float64))
         ok = isfinite(rho) && rho <= DENSE_ESTIMATE_MAX_CONTRACTION
         estimate = (ok ? e / (1 - rho) : e) / scales[j] / x
-        push!(passed, ok && isfinite(estimate))
+        # a residual of the size of the right-hand side means the solution is not trustworthy either
+        push!(passed, ok && isfinite(estimate) && !(rn >= bn / 2 && !iszero(rn)))
         push!(estimates, isfinite(estimate) ? estimate : NaN)
     end
     return estimates, passed
