@@ -41,9 +41,9 @@ gemergt, gilt der Abschnitt „Vereinbarung“ als Ergänzung zu `docs/COLLABORA
 - **Sprache.** Deutsch für alle Beiträge. Code, Bezeichner und Commit-Nachrichten bleiben Englisch.
 - **Branches.** `claude/...` bzw. `chatgpt/...`. Änderungen an `memory-fork` nur per PR. `main` bleibt
   unveränderter Upstream-Spiegel, ohne Commits und ohne PRs (wie in `docs/COLLABORATION.md`).
-- **Merge.** Der Besitzer entscheidet. Offene Frage an den Besitzer: Bisher hat Claude PR #1 und #5 nach seinem
-  ausdrücklichen „mehet“ selbst gemergt, was `docs/COLLABORATION.md` (kein Agent merged) widerspricht. Der
-  Besitzer legt fest, ob er künftig selbst mergt oder diese Ausnahme in die Regeln aufgenommen wird.
+- **Merge.** Der Besitzer entscheidet. Entscheidung des Besitzers (22.11.2026): Claude führt den Merge aus,
+  aber nur nach seiner ausdrücklichen Freigabe („mehet“) für genau diesen PR. ChatGPT merged nicht. Diese
+  Ausnahme ergänzt die Regel „kein Agent merged“ in `docs/COLLABORATION.md`.
 - **Zuständigkeit.** Jeder korrigiert nur seinen eigenen Code. Fehler im Code des anderen werden als Review oder
   Issue gemeldet, mit reproduzierbarem Beispiel.
 - **Review-Ergebnis.** „Approve“, „Changes requested“ oder „Comment“ (nicht blockierende Hinweise), wie in
@@ -60,5 +60,12 @@ gemergt, gilt der Abschnitt „Vereinbarung“ als Ergänzung zu `docs/COLLABORA
 - 10:28–10:30: automatisches Codex-Review (`chatgpt-codex-connector[bot]`) nach ~2,5 Minuten, Auslöser
   „PR opened“. Es prüft den Inhalt wie Code (3 berechtigte Hinweise, hier eingearbeitet), beantwortet aber die
   Fragen nicht: Der automatische Review-Bot ist ein Prüfer, kein Gesprächspartner. Schritt 2 ist damit offen.
-- 10:5x: Claude arbeitet die 3 Hinweise ein (dieser Push = Test „zweites automatisches Review“) und testet,
+- 10:47: Claude arbeitet die 3 Hinweise ein (dieser Push = Test „zweites automatisches Review“) und testet,
   ob eine Erwähnung des Codex-Bots mit einer Frage eine inhaltliche Antwort auslöst.
+- 10:47–10:49: Push → zweites automatisches Review nach ~2 Minuten, ohne Befund. **Claude → ChatGPT
+  funktioniert automatisch.**
+- 10:47: Erwähnung `@codex` mit inhaltlicher Bitte aus Claudes Kommentar (Konto des Besitzers) → Antwort des Bots
+  „To use Codex here, create a Codex account and connect to github“. Erwähnungen wirken nur für ein GitHub-Konto,
+  das mit einem ChatGPT/Codex-Konto verbunden ist; das Konto des Besitzers ist es nicht. Die inhaltlichen
+  Antworten (Schritt 2) kommen deshalb nur, wenn Steffen ChatGPT startet.
+- Offen: Schritt 2 (Antwort von ChatGPT auf die Fragen 1–5 und eine Frage an Claude).
