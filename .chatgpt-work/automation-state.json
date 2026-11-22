@@ -21,11 +21,26 @@
     22
   ],
   "lease": {
-    "holder": "setup-2026-11-22T16:38:28.581Z",
-    "acquired_at": "2026-11-22T16:38:28.581Z",
-    "expires_at": "2026-11-22T16:48:28.581Z",
+    "holder": null,
+    "acquired_at": null,
+    "expires_at": null,
     "fencing_token": 1
   },
-  "last_completed_run": null,
+  "last_completed_run": {
+    "id": "setup-2026-11-22T16:38:28.581Z",
+    "completed_at": "2026-11-22T16:39:14.510Z",
+    "status": "setup_validation",
+    "source_commit": "a62cae98841c95d1981f8768423c39db9637daf1",
+    "python": {
+      "passed": 256,
+      "skipped": 1,
+      "skip_reason": "native Windows working-set API on Linux"
+    },
+    "ruff": "passed",
+    "julia_cpu_host": {
+      "passed": 26
+    },
+    "github_commit_write": "verified"
+  },
   "note": "Coordination state only. Read project code from the assigned source branch. Acquire and update this lease through expected-SHA branch updates; do not merge this branch."
 }
