@@ -43,7 +43,7 @@ using FMM3D, Krylov, LinearMaps
 using ..BeatEngineCore
 const BC = BeatEngineCore
 
-export FmmCoupledSolve, fmm_bordered_preconditioner, fmm_coupled_preconditioner, FmmCoupledPreconditioner, fmm_near_blocks, fmm_hfmm3d_checked, fmm_near_preconditioner, FmmBurtonMillerOperator, fmm_burton_miller_operator, fmm_lhs_mul!, fmm_lhs_mul, fmm_rhs
+export FmmCoupledSolve, FmmNotConvergedError, fmm_bordered_preconditioner, fmm_coupled_preconditioner, FmmCoupledPreconditioner, fmm_near_blocks, fmm_hfmm3d_checked, fmm_near_preconditioner, FmmBurtonMillerOperator, fmm_burton_miller_operator, fmm_lhs_mul!, fmm_lhs_mul, fmm_rhs
 
 struct FmmBurtonMillerOperator{T<:AbstractFloat}
     k::T
@@ -145,6 +145,7 @@ function fmm_burton_miller_operator(mesh::BC.BoundaryMesh{T}, p1, dp0, k::T, rul
 
     # adjacent pairs: + Duffy
     cache = BC.build_singular_correction_cache(mesh, singular_order, collect(eachindex(mesh.faces)))
+    adjacent_done = Set{Tuple{Int,Int}}()
     for pair in cache.pairs
         test = elements[pair.test_index]; trial = elements[pair.trial_index]
         duffy = cache.rules[pair.rule_index]
@@ -153,6 +154,11 @@ function fmm_burton_miller_operator(mesh::BC.BoundaryMesh{T}, p1, dp0, k::T, rul
             pair.normal_product, pair.jac_scale, k, coupling,
             duffy.test_points, duffy.trial_points, duffy.weights)
         push_block!(test, trial, lhs_block, one(T), rhs_block; to_near=true)
+        # and remove the far (regular) value the FMM adds for this pair, here and not in the
+        # radius search below, so a small near_factor cannot leave an adjacent pair counted twice
+        fa, rfa = regular(test, trial, fquad[pair.test_index], fquad[pair.trial_index])
+        push_block!(test, trial, fa, -one(T), rfa)
+        push!(adjacent_done, (pair.test_index, pair.trial_index))
     end
 
     # near-pair search on element centroids (uniform grid, cell = near radius)
@@ -174,9 +180,10 @@ function fmm_burton_miller_operator(mesh::BC.BoundaryMesh{T}, p1, dp0, k::T, rul
         return out
     end
 
-    # identity pairs: adjacent -> - far value; near non-adjacent -> + exact - far
+    # identity pairs: near non-adjacent -> + exact - far (adjacent ones handled above)
     for e in 1:ne, f in near_of(mesh.centroids[e])
         adjacent = BC.elements_are_adjacent(elements[e].face, elements[f].face)
+        adjacent && (e, f) in adjacent_done && continue       # far value already removed above
         if !adjacent
             if !same_rule
                 ex, rex = regular(elements[e], elements[f], quad[e], quad[f])
@@ -572,6 +579,9 @@ right-hand sides). The operator is `rest * x` plus, on the BEM rows B,
 `A x_B + C (flux x_Q + motion_flux x_M)` from the FMM operator. Each column is solved by
 row-equilibrated, right-preconditioned GMRES (`atol = 0`) with the bordered near-field
 preconditioner; per-column iteration counts and residuals are kept in `stats`.
+If any column does not reach `rtol` within `maxiter`, `S \\ rhs` throws `FmmNotConvergedError`
+(with the failed columns, their residuals and the iterates); it never returns an unconverged
+iterate as a solution.
 """
 mutable struct FmmCoupledSolve
     op::FmmBurtonMillerOperator
@@ -587,6 +597,15 @@ mutable struct FmmCoupledSolve
     maxiter::Int
     stats::Vector{NamedTuple}
 end
+
+struct FmmNotConvergedError <: Exception
+    columns::Vector{Int}                 # right-hand-side columns that did not converge
+    residuals::Vector{Float64}           # their scaled relative residuals
+    iterates::Matrix{ComplexF64}         # all columns, as far as GMRES got
+end
+Base.showerror(io::IO, e::FmmNotConvergedError) =
+    print(io, "FMM/H GMRES did not converge for right-hand side(s) ", e.columns,
+          " (scaled relative residuals ", e.residuals, ")")
 
 Base.size(S::FmmCoupledSolve, d::Integer) = size(S.rest, d)
 Base.size(S::FmmCoupledSolve) = size(S.rest)
@@ -630,6 +649,7 @@ function Base.:\(S::FmmCoupledSolve, rhs::AbstractVecOrMat)
     P = LinearMap{ComplexF64}(v -> S.precond \ (D \ v), n, n)
     R = rhs isa AbstractVector ? reshape(rhs, :, 1) : rhs
     X = zeros(ComplexF64, n, size(R, 2))
+    failed = Int[]; failed_residuals = Float64[]
     for c in axes(R, 2)
         b = D * ComplexF64.(R[:, c])
         if iszero(b)
@@ -639,7 +659,9 @@ function Base.:\(S::FmmCoupledSolve, rhs::AbstractVecOrMat)
             itmax=S.maxiter, restart=S.maxiter > 300)
         X[:, c] = x
         push!(S.stats, (iterations=st.niter, solved=st.solved, residual=norm(b - A * x) / norm(b), seconds=t))
+        st.solved || (push!(failed, c); push!(failed_residuals, S.stats[end].residual))
     end
+    isempty(failed) || throw(FmmNotConvergedError(failed, failed_residuals, X))
     return rhs isa AbstractVector ? vec(X) : X
 end
 

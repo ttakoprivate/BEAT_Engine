@@ -5,8 +5,10 @@ include(joinpath(pwd(), "src", "BeatEngineCoupled.jl"))
 include(joinpath(pwd(), "src", "BeatEngineFmm.jl")); using .BeatEngineFmm
 using Krylov, LinearMaps, Random, SparseArrays, Printf, StaticArrays, LinearAlgebra, Serialization
 const BC = BeatEngineCore
-include(joinpath(@__DIR__, "hmat_core.jl")); include(joinpath(@__DIR__, "hmat_fast.jl"))
-include(joinpath(@__DIR__, "hmat_ka.jl")); include(joinpath(@__DIR__, "hmat_c.jl"))
+# repository layout: hmatrix_dev/tests/ next to hmatrix_dev/*.jl; Mac kit layout: all files in one folder
+const HMAT_DIR = isfile(joinpath(@__DIR__, "hmat_core.jl")) ? (@__DIR__) : joinpath(@__DIR__, "..")
+include(joinpath(HMAT_DIR, "hmat_core.jl")); include(joinpath(HMAT_DIR, "hmat_fast.jl"))
+include(joinpath(HMAT_DIR, "hmat_ka.jl")); include(joinpath(HMAT_DIR, "hmat_c.jl"))
 function hmat_load(dir)
     vals = Pair{Symbol,Any}[]
     rd(name, T, dims) = (a = Array{T}(undef, dims...); read!(joinpath(dir, name * ".bin"), a); a)
@@ -128,11 +130,35 @@ end
 # ---- a-posteriori error estimate prototype (env HMAT_TRUTH_DIR = Float64 dump of the same frequency) ----
 # estimate: residual of the dumped solution against the independent H operator, one correction solve
 # M_H d = r (loose tolerance / few iterations), d ~ x_true - x_dumped. Compared with the real error vs Float64.
+# Scope: only the BEM operator rows (A and C) are re-evaluated independently (H operator, Float64 near
+# entries). `rest` (FEM, interface, transducer rows) and the right-hand side come from the dump being
+# checked, so errors in those blocks are NOT seen by this estimate.
+function check_truth(truth, d)
+    meta(x, key) = hasproperty(x, key) ? string(getproperty(x, key)) : "missing"
+    unchecked = get(ENV, "HMAT_TRUTH_UNCHECKED", "0") == "1"
+    problems = String[]
+    meta(truth, :solver_scalar_type) == "Float64" || push!(problems, "truth solver_scalar_type = $(meta(truth, :solver_scalar_type)) (Float64 required)")
+    meta(truth, :solution_eltype) == "ComplexF64" || push!(problems, "truth solution_eltype = $(meta(truth, :solution_eltype))")
+    truth.frequency_hz == d.frequency_hz || push!(problems, "frequency $(truth.frequency_hz) vs $(d.frequency_hz)")
+    size(truth.rhs) == size(d.rhs) || push!(problems, "rhs size $(size(truth.rhs)) vs $(size(d.rhs))")
+    size(truth.rhs) == size(d.rhs) && (mis = norm(truth.rhs - d.rhs) / norm(truth.rhs)) > 1e-3 &&
+        push!(problems, "right-hand sides differ by $(mis) (different model or excitation order?)")
+    if !isempty(problems)
+        unchecked || error("HMAT_TRUTH_DIR is not a usable Float64 reference: " * join(problems, "; ") *
+                           " (set HMAT_TRUTH_UNCHECKED=1 to compare anyway)")
+        println("   WARNING (HMAT_TRUTH_UNCHECKED=1): ", join(problems, "; "))
+    end
+    return unchecked && !isempty(problems) ? "UNCHECKED reference" : "Float64 dump"
+end
+
 if haskey(ENV, "HMAT_TRUTH_DIR")
-    tr = hmat_load(ENV["HMAT_TRUTH_DIR"]).dense_solution
-    ec < ep && (tr = conj.(tr))   # same convention as d (conjugated above when ec < ep)
+    truth = hmat_load(ENV["HMAT_TRUTH_DIR"])
+    ec < ep && (truth = merge(truth, (rhs=conj.(truth.rhs), dense_solution=conj.(truth.dense_solution))))  # as d above
+    label = check_truth(truth, d)
+    tr = truth.dense_solution
     nexc = min(size(d.rhs, 2), parse(Int, get(ENV, "HMAT_EST_NEXC", "6")))
-    println("\n== a-posteriori estimate vs true error (truth: Float64 dump)")
+    println("\n== a-posteriori estimate vs true error (truth: $label)")
+    println("   scope: residual of A, C re-evaluated (H operator); rest and rhs taken from the checked dump")
     for its in (3, 15), c in 1:nexc
         b = d.rhs[:, c]; xs = d.dense_solution[:, c]; xt = tr[:, c]
         r = b - hmul_coupled(xs)

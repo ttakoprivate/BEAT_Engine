@@ -451,3 +451,30 @@ Consequence for the error indicator: the refinement step already has the ingredi
 (Float64 residual + one correction). The size of that correction, mapped through the output operators, bounds the
 error of the unrefined iterate; for the refined result it is a conservative upper bound. Next: log the correction
 norm per output, and compare it with the true error on the dumps (unrefined x32 vs f64).
+
+## Review of 3190c88 (ChatGPT agent, 2026-11-21) and fixes (branch claude/hmatrix-review-fixes)
+
+1. **Dump checker estimate scope.** The residual re-evaluates only the BEM operator rows (A, C) through the
+   H operator; `rest` (FEM, interface, transducer rows) and the right-hand side are taken from the dump being
+   checked. Errors in those blocks are not seen (reviewer's 2x2 transducer block example: estimate 0, true 25 %).
+   The checker now prints this scope. The 20 kHz table above stays valid for what it measures (error in the
+   BEM operator part, which dominates for the h343 model), not as a total-error estimate.
+2. **`near_factor` below the element size counted adjacent pairs twice** (Duffy added for all adjacent pairs,
+   regular value removed only inside the radius search; 17 % / 46 % boundary-pressure error at 0.25). Fixed:
+   the regular value of every adjacent pair is removed in the `cache.pairs` loop. Regression test in
+   `tests/fmm_operator_tests.jl` (fails before, passes after).
+3. **ACA stop was absolute for tiny blocks** (`eps()` floor on the squared norm; s = 1e-16 diagonal block lost a
+   rank). Now relative only, in `aca` and `aca_batched`.
+4. **An empty start row consumed the rank budget in scalar ACA.** Only accepted rank-1 terms count now.
+   Tests for 3 and 4: `hmatrix_dev/tests/hmat_aca_test.jl` (scalar and batched).
+5. **`FmmCoupledSolve \ b` returned an unconverged GMRES iterate.** It now throws `FmmNotConvergedError`
+   (failed columns, residuals, iterates). Test in `tests/fmm_operator_tests.jl`.
+6. **A Float32 dump could pass as Float64 truth.** The dump hook records `assembly_eltype`, `solution_eltype`,
+   `solver_scalar_type` and `dense_solver`; the checker refuses a truth dump that is not Float64 or whose
+   frequency / size / right-hand sides do not match (`HMAT_TRUTH_UNCHECKED=1` overrides, for dumps written
+   before this change).
+7. The checker and tests include the H files from `hmatrix_dev/` in the repository layout and from their own
+   folder in the flat Mac-kit layout.
+
+CPU re-run of `hmat_coupled_proto.jl` (2 kHz fixture, tol 1e-4): 24 GMRES iterations, BEM p 1.6e-6,
+q 7.4e-6, mech 2.0e-8, elec 5.4e-10 vs dense (same as the reviewer's numbers).

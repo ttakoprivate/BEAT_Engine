@@ -36,8 +36,10 @@ end
 """ACA with partial pivoting. row(i) -> entries of row I[i] over J, col(j) -> column J[j] over I."""
 function aca(row, col, m::Int, n::Int, tol::Float64; maxrank::Int=min(m, n))
     U = Vector{Vector{ComplexF64}}(); V = Vector{Vector{ComplexF64}}()
-    usedr = falses(m); i = 1; norm2 = 0.0
-    for _ in 1:maxrank
+    usedr = falses(m); i = 1; norm2 = 0.0; visits = 0
+    # only accepted rank-1 terms count against maxrank; an empty pivot row just moves on
+    while length(U) < maxrank && visits < m
+        visits += 1
         r = Vector{ComplexF64}(row(i))
         for t in eachindex(U); r .-= U[t][i] .* conj.(V[t]); end
         usedr[i] = true
@@ -55,7 +57,8 @@ function aca(row, col, m::Int, n::Int, tol::Float64; maxrank::Int=min(m, n))
         nu2 = sum(abs2, c) * sum(abs2, v)
         norm2 += nu2 + 2real(cross)
         push!(U, c); push!(V, v)
-        sqrt(nu2) <= tol * sqrt(max(norm2, eps())) && break
+        # relative stop; no absolute floor, so a block of tiny entries keeps the same relative accuracy
+        sqrt(nu2) <= tol * sqrt(max(norm2, nu2)) && break
         a = abs.(c); a[usedr] .= -1; i = argmax(a)
         a[i] < 0 && break
     end

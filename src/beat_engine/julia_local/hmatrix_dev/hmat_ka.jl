@@ -244,7 +244,7 @@ function aca_batched(states::Vector{ACAState}, entries, tol::Float64)
                 nu2 = sum(abs2, c) * sum(abs2, v)
                 s.norm2 += nu2 + 2real(cross)
                 push!(s.U, c); push!(s.V, v); s.steps += 1
-                if sqrt(nu2) <= tol * sqrt(max(s.norm2, eps())) || s.steps >= min(length(s.I), length(s.J))
+                if sqrt(nu2) <= tol * sqrt(max(s.norm2, nu2)) || s.steps >= min(length(s.I), length(s.J))
                     s.phase = :done; continue
                 end
                 a = abs.(c); a[s.usedr] .= -1; i = argmax(a)
