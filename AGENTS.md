@@ -17,3 +17,11 @@ range, per-section timings, peak memory and accuracy against a reference; no
 claim inside run-to-run variance. Bound an overlap or offload's gain from
 measured timings before building it, and take its on/off choice from
 calibration, not a constant measured on one machine.
+
+## Codex in ttakoprivate/BEAT_Engine
+
+The repository owner gives Codex standing approval to publish its reviews,
+replies, commit comments, issues (including ideas), and its own pull requests
+on GitHub during assigned work. Write issues, reviews, replies, and pull
+request descriptions in German. Use `chatgpt/` branches for contributions.
+The owner decides and merges. [Collaboration rules](docs/COLLABORATION.md)
