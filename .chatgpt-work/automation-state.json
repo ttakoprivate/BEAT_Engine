@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "repository": "ttakoprivate/BEAT_Engine",
+  "worker": "chatgpt-work-hourly",
+  "timezone": "Europe/Berlin",
+  "hours": [
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22
+  ],
+  "lease": {
+    "holder": null,
+    "acquired_at": null,
+    "expires_at": null,
+    "fencing_token": 0
+  },
+  "last_completed_run": null,
+  "note": "Coordination state only. Read project code from the assigned source branch. Acquire and update this lease through expected-SHA branch updates; do not merge this branch."
+}
