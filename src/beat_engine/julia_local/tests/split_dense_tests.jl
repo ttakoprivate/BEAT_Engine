@@ -72,6 +72,7 @@ end
             factorization = SD.SplitRefinedLU(split_build(f))
             @test (factorization.spill_path !== nothing) == (spill == "on")
             @test spill == "off" || isempty(factorization.matrix.hi)   # factored in place when spilled
+            @test factorization.componentwise_tolerance == 2 * (f.n + 1) * eps(Float64)
             solution = factorization \ rhs
             @test norm(solution - reference) / norm(reference) < 1e-12
             @test factorization.backward_error <= 1 && isnothing(factorization.fallback)
@@ -161,6 +162,8 @@ end
             factorization = SD.SplitRefinedLU(host,
                 x -> (solves[] += 1; ComplexF64.(device_factor \ x)), () -> (released[] = true; nothing))
             @test isnothing(factorization.factor) && (factorization.spill_path !== nothing) == (spill == "on")
+            # review PR #15: the tolerance uses the system size, also after a spill empties `hi`
+            @test factorization.componentwise_tolerance == 2 * (n + 1) * eps(Float64)
             solution = factorization \ rhs
             @test norm(solution - reference) / norm(reference) < 1e-12
             @test factorization.backward_error <= 1 && solves[] >= 2  # initial solve + refinement

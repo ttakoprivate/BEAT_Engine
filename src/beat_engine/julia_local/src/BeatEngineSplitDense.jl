@@ -606,12 +606,13 @@ host and is skipped; a stall falls back to a host `ComplexF64` LU.
 """
 function SplitRefinedLU(matrix::SplitDenseMatrix, device_solve::Function, release_device::Function)
     all(isfinite, matrix.hi) || throw(ArgumentError("dense coupled matrix has non-finite entries"))
-    spill_directory = _dense_spill_target(size(matrix, 1))
+    n = size(matrix, 1)                  # before a spill empties `matrix.hi` (size reads it)
+    spill_directory = _dense_spill_target(n)
     matrix_norm = _split_opnorm_inf(matrix.hi, matrix)
     store, spill_path = isnothing(spill_directory) ? (matrix.hi, nothing) : _split_spill(matrix.hi, spill_directory)
     isnothing(spill_path) || (matrix.hi = Matrix{ComplexF32}(undef, 0, 0))
     return SplitRefinedLU(matrix, store, matrix_norm, nothing, nothing, 0, 0, nothing, NaN, NaN,
-                          _split_componentwise_tolerance(size(matrix, 1)), Float64[], Bool[],
+                          _split_componentwise_tolerance(n), Float64[], Bool[],
                           spill_path, device_solve, release_device)
 end
 

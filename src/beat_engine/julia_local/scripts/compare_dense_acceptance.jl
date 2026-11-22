@@ -40,13 +40,18 @@ function solve(s, ::Type{T}, f, env...) where {T}
     end
 end
 
-# max pointwise complex relative error where |reference| > 1e-6 max|reference|, and max abs error / max|reference|
+# Max pointwise complex relative error over every non-zero reference entry, max absolute error at
+# exact zeros of the reference (with their count), and as an extra figure the max relative error over
+# entries above 1e-6 of the peak (level-filtered).
 function pointwise(reference, candidate)
     r = ComplexF64.(collect(reference)); c = ComplexF64.(collect(candidate))
+    nonzero = .!iszero.(r)
+    rel = any(nonzero) ? maximum(abs.(c[nonzero] .- r[nonzero]) ./ abs.(r[nonzero])) : NaN
+    zero_abs = any(.!nonzero) ? maximum(abs.(c[.!nonzero])) : 0.0
     peak = maximum(abs, r; init=0.0)
-    mask = abs.(r) .> 1e-6 * peak
-    rel = any(mask) ? maximum(abs.(c[mask] .- r[mask]) ./ abs.(r[mask])) : NaN
-    return rel, peak > 0 ? maximum(abs, c .- r) / peak : 0.0
+    filtered = abs.(r) .> 1e-6 * peak
+    rel_filtered = any(filtered) ? maximum(abs.(c[filtered] .- r[filtered]) ./ abs.(r[filtered])) : NaN
+    return rel, count(.!nonzero), zero_abs, rel_filtered
 end
 
 common = ("BLAB_COUPLED_TRANSDUCER_CONDENSATION" => "1", "BLAB_COUPLED_INTERFACE_FLUX_ELIMINATION" => "1")
@@ -63,10 +68,10 @@ for f in frequencies
                 something(diagnostics["dense_refinement_fallback_reason"], "none"), diagnostics["dense_refinement_backward_error"],
                 string(diagnostics["dense_refinement_componentwise_backward_error"]), string(diagnostics["dense_refinement_componentwise_tolerance"]), t)
         for field in FIELDS, k in eachindex(candidate)
-            rel, ab = pointwise(getproperty(reference[k], field), getproperty(candidate[k], field))
-            rel64, ab64 = pointwise(getproperty(full64[k], field), getproperty(candidate[k], field))
-            @printf("  exc%d %-20s vs F64-LU(same A): rel %.3e abs/peak %.3e | vs full F64 build: rel %.3e abs/peak %.3e\n",
-                    k, field, rel, ab, rel64, ab64)
+            rel, zeros_, zero_abs, filtered = pointwise(getproperty(reference[k], field), getproperty(candidate[k], field))
+            rel64, zeros64, zero_abs64, filtered64 = pointwise(getproperty(full64[k], field), getproperty(candidate[k], field))
+            @printf("  exc%d %-20s vs F64-LU(same A): rel %.3e (>1e-6 peak %.3e) zeros %d abs %.3e | vs full F64 build: rel %.3e (>1e-6 peak %.3e) zeros %d abs %.3e\n",
+                    k, field, rel, filtered, zeros_, zero_abs, rel64, filtered64, zeros64, zero_abs64)
         end
     end
 end
