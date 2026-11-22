@@ -117,14 +117,27 @@ end
 # |conj(z_i) r_asm_i| if every entry carries a relative assembly error of the same order. Needs only
 # the adjoint z and quantities of the mixed system; r_asm is then computed on the checked rows.
 function _inclusion_probabilities(w, s)
+    # exact water filling: the k largest weights are capped at 1, the rest scaled by c = (s - k) / Σ rest,
+    # with the smallest k for which c times the largest uncapped weight stays ≤ 1 (no bisection range issues)
     count(>(0), w) <= s && return Float64.(w .> 0)
-    lo, hi = 0.0, s / minimum(w[w .> 0])                         # Σ min(1, c w) is monotone in c
-    for _ in 1:200
-        c = (lo + hi) / 2
-        sum(min.(1.0, c .* w)) < s ? (lo = c) : (hi = c)
+    order = sortperm(w; rev=true)
+    sorted = w[order]
+    tail = reverse(cumsum(reverse(sorted)))                      # tail[k+1] = Σ of the weights after the k largest
+    pi = zeros(Float64, length(w))
+    for k in 0:(floor(Int, s) - 1)
+        c = (s - k) / tail[k + 1]
+        if c * sorted[k + 1] <= 1
+            pi[order[1:k]] .= 1.0
+            pi[order[(k + 1):end]] .= c .* sorted[(k + 1):end]
+            return pi
+        end
     end
-    return min.(1.0, hi .* w)
+    error("no inclusion probabilities for s = $s")              # unreachable when count(w > 0) > s
 end
+@assert sum(_inclusion_probabilities([1.0, 1, 1, 1, 1e-100], 2)) ≈ 2       # review PR #13
+@assert sum(_inclusion_probabilities([1.0, 1, 1, 1, 0.25], 2)) ≈ 2
+@assert _inclusion_probabilities([100.0, 1, 1, 1], 2) ≈ [1.0, 1 / 3, 1 / 3, 1 / 3]
+@assert sum(_inclusion_probabilities(exp10.(range(-100, 0; length=500)), 64)) ≈ 64
 
 function importance_estimate(r_asm, z, weights, ranges, s, rng)
     bem = collect(ranges.bem)
@@ -134,23 +147,36 @@ function importance_estimate(r_asm, z, weights, ranges, s, rng)
     return sum(conj.(z[small]) .* r_asm[small]) + sum(conj.(z[bem[chosen]]) .* r_asm[bem[chosen]] ./ pi[chosen]), count(chosen)
 end
 
+# BEM node with the largest relative assembly difference among the non-zero references; nothing if none
+function worst_relative_node(reference, candidate, bem)
+    nonzero = filter(i -> !iszero(reference[i]), bem)
+    isempty(nonzero) && return nothing
+    return nonzero[argmax(abs.(reference[nonzero] .- candidate[nonzero]) ./ abs.(reference[nonzero]))]
+end
+@assert worst_relative_node(zeros(ComplexF64, 67), ones(ComplexF64, 67), 1:65) === nothing   # review PR #13
+
 relative_to(estimate, truth) = abs(estimate - truth) / abs(truth)
 stats(v) = (median(v), minimum(v), maximum(v))
 
 function row_check(mix, full, x_mix, x_64; label, sizes=(16, 64, 256), seeds=1:20)
     n = size(mix.A, 1)
     # productive factor (as assembled) or, for the perturbed control, a ComplexF32 LU of that matrix
-    factor32 = something(mix.factor, lu(ComplexF32.(mix.A)))
+    factor32 = mix.factor === nothing ? lu(ComplexF32.(mix.A)) : mix.factor   # no extra LU when present
     factor64 = lu(mix.A)                                         # independent Float64 comparison
     bem = collect(mix.ranges.bem)
     head = bem[1:min(64, length(bem))]
     small = vcat(collect(mix.ranges.mechanical), collect(mix.ranges.electrical))
-    names = ["current", "velocity", "p_bem[worst]", "p_bem[1]", "p_bem[mid]"]
+
     for e in axes(mix.x, 2)
         # outputs: current, velocity, the BEM node with the largest assembly error of this excitation, two fixed nodes
-        nonzero = filter(i -> !iszero(x_64[i, e]), bem)
-        worst = nonzero[argmax(abs.(x_64[nonzero, e] .- x_mix[nonzero, e]) ./ abs.(x_64[nonzero, e]))]
-        outputs = vcat(collect(mix.ranges.electrical), collect(mix.ranges.mechanical), [worst, bem[1], bem[end ÷ 2]])
+        worst = worst_relative_node(x_64[:, e], x_mix[:, e], bem)
+        if worst === nothing      # the BEM reference vanishes for this excitation: no relative control node
+            @printf("  excitation %d: BEM reference exactly zero; max absolute assembly difference %.3e\n",
+                    e, maximum(abs.(x_64[bem, e] .- x_mix[bem, e]); init=0.0))
+        end
+        outputs = vcat(collect(mix.ranges.electrical), collect(mix.ranges.mechanical),
+                       worst === nothing ? Int[] : [worst], [bem[1], bem[end ÷ 2]])
+        names = vcat(["current", "velocity"], worst === nothing ? String[] : ["p_bem[worst]"], ["p_bem[1]", "p_bem[mid]"])
         G = zeros(ComplexF64, n, length(outputs))
         for (k, i) in enumerate(outputs); G[i, k] = 1; end
         Z = ComplexF64.(factor32' \ ComplexF32.(G))            # adjoint with the productive Float32 factor
