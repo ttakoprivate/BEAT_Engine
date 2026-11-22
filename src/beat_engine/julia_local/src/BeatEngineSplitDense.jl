@@ -166,19 +166,31 @@ const FALLBACK_REFINEMENT_STEPS = 2
 function _refine_fallback!(acceptance!, fallback, solution, residual, factorization)
     ratios, normwise = acceptance!(solution)
     isnan(factorization.componentwise_tolerance) && return solution, normwise   # test off: previous behaviour
+    # per right-hand side: refine only the open columns and keep each column's best iterate, so a
+    # column that is not helped cannot discard the correction of an independent one (review PR #15)
+    columns = solution isa AbstractVector ? reshape(solution, :, 1) : solution
+    open = [isfinite(w) && r > 1 for (w, r) in zip(normwise, ratios)]
+    best = copy(ratios)
     steps = 0
-    while steps < FALLBACK_REFINEMENT_STEPS && all(isfinite, normwise) && maximum(ratios; init=0.0) > 1
-        previous = maximum(ratios)
-        candidate = solution .+ (fallback \ residual)
-        candidate_ratios, candidate_normwise = acceptance!(candidate)
-        if !(maximum(candidate_ratios; init=0.0) < previous)
-            ratios, normwise = acceptance!(solution)     # discard the step, restore the residual
+    while steps < FALLBACK_REFINEMENT_STEPS && any(open)
+        correction = fallback \ (residual isa AbstractVector ? residual : residual[:, open])
+        candidate = copy(columns)
+        candidate[:, open] .+= correction isa AbstractVector ? reshape(correction, :, 1) : correction
+        candidate_ratios, _ = acceptance!(solution isa AbstractVector ? vec(candidate) : candidate)
+        improved = open .& (candidate_ratios .< best)
+        if !any(improved)
+            ratios, normwise = acceptance!(solution)          # restore the residual of the kept iterate
             break
         end
-        solution, ratios, normwise = candidate, candidate_ratios, candidate_normwise
+        columns[:, improved] .= candidate[:, improved]
+        best[improved] .= candidate_ratios[improved]
+        open .= improved .& (best .> 1)
         steps += 1
+        # the residual must belong to the current iterate before the next correction or on return
+        ratios, normwise = acceptance!(solution)
     end
-    if maximum(ratios; init=0.0) > 1 && !isnan(factorization.componentwise_tolerance)
+    factorization.fallback_refinement_steps = max(factorization.fallback_refinement_steps, steps)
+    if maximum(ratios; init=0.0) > 1
         note = "componentwise backward error $(factorization.componentwise_backward_error) above the tolerance " *
                "$(factorization.componentwise_tolerance) after the Float64 LU and $steps refinement step(s)"
         factorization.fallback_reason = something(factorization.fallback_reason, "Float64 LU") * "; " * note
@@ -594,6 +606,7 @@ mutable struct SplitRefinedLU
     # returns the ComplexF64 host solution, `release_device()` frees it. `factor` is then nothing.
     device_solve::Union{Nothing,Function}
     release_device::Union{Nothing,Function}
+    fallback_refinement_steps::Int            # most Float64 refinement steps after the fallback (any solve)
 end
 
 _split_componentwise_tolerance(n) = _dense_componentwise_enabled() ? _dense_componentwise_tolerance(n) : NaN
@@ -612,7 +625,7 @@ function SplitRefinedLU(matrix::SplitDenseMatrix)
     matrix_norm = _split_opnorm_inf(matrix.hi, matrix)
     store, spill_path = isnothing(spill_directory) ? (matrix.hi, nothing) : _split_spill(matrix.hi, spill_directory)
     refined = SplitRefinedLU(matrix, store, matrix_norm, nothing, nothing, 0, 0, nothing, NaN, NaN,
-                             _split_componentwise_tolerance(n), Float64[], Bool[], spill_path, nothing, nothing)
+                             _split_componentwise_tolerance(n), Float64[], Bool[], spill_path, nothing, nothing, 0)
     if matrix.overflow
         _split_fall_back!(refined, "an entry is outside the Float32 range")
         return refined
@@ -647,7 +660,7 @@ function SplitRefinedLU(matrix::SplitDenseMatrix, device_solve::Function, releas
     isnothing(spill_path) || (matrix.hi = Matrix{ComplexF32}(undef, 0, 0))
     return SplitRefinedLU(matrix, store, matrix_norm, nothing, nothing, 0, 0, nothing, NaN, NaN,
                           _split_componentwise_tolerance(n), Float64[], Bool[],
-                          spill_path, device_solve, release_device)
+                          spill_path, device_solve, release_device, 0)
 end
 
 """Free a device-held factor (no-op for host factors)."""

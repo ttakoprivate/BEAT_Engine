@@ -568,9 +568,43 @@ end
         @test factorization.componentwise_backward_error <= factorization.componentwise_tolerance
         @test maximum(abs.(solution .- exact) ./ abs.(exact)) < 1e-12
         @test !occursin("above the tolerance", factorization.fallback_reason)
+        @test factorization.fallback_refinement_steps == 1                     # review: steps are reported
+        @test SD.dense_solver_diagnostics((factorization=factorization,))["dense_refinement_fallback_steps"] == 1
         @test vec(factorization \ rhs[:, 1]) ≈ solution[:, 1] rtol = 1e-12   # vector right-hand side
         # with the componentwise test off, the fallback solution is returned unrefined as before
         legacy = withenv(build, "BLAB_COUPLED_DENSE_COMPONENTWISE" => "0")
         @test maximum(abs.((legacy \ rhs) .- exact) ./ abs.(exact)) > 0.1
+    end
+end
+
+@testset "Float64 fallback refinement keeps each right-hand side's best iterate (ChatGPT review on PR #15)" begin
+    split_of(dense) = (n = size(dense, 1); m = SD.SplitDenseMatrix(n, 1:n, 1:n);
+                       for j in 1:n, i in 1:n; m[i, j] = dense[i, j]; end; m)
+    # review counterexample: two independent Wilkinson blocks (58, 129), one excitation each; the
+    # refinement step helps the first column and not the second, which must not discard the first
+    W(n) = ComplexF64[j == n || i == j ? 1 : i > j ? -1 : 0 for i in 1:n, j in 1:n]
+    A = zeros(ComplexF64, 187, 187)
+    A[1:58, 1:58] = W(58)
+    A[59:end, 59:end] = W(129)
+    rng = MersenneTwister(11)
+    X = zeros(ComplexF64, 187, 2)
+    X[1:58, 1] = complex.(rand(rng, 1:7, 58), rand(rng, 1:7, 58))
+    X[59:end, 2] = complex.(rand(rng, -7:7, 129), rand(rng, -7:7, 129))
+    B = A * X
+    first_block = 1:58
+    relative(x) = maximum(abs.(x[first_block] .- X[first_block, 1]) ./ abs.(X[first_block, 1]))
+    for build in (() -> SD.SplitRefinedLU(split_of(A)), () -> SD.RefinedDenseLU(copy(A)))
+        factorization = @test_logs (:warn,) match_mode=:any build()
+        @test !isnothing(factorization.fallback)
+        single = factorization \ B[:, 1]                       # converges alone: no warning
+        batch = @test_logs (:warn,) match_mode=:any factorization \ B
+        @test relative(single) < 1e-14
+        @test relative(batch[:, 1]) < 1e-14                     # was 2.24 before the fix
+        @test batch[:, 1] ≈ single rtol = 1e-14                 # same iterate alone and together
+        @test iszero(batch[59:end, 1])                          # exact zeros stay exact
+        # the reported ω belongs to the returned columns
+        residual = B - A * batch
+        omega = maximum(SD._componentwise_backward_errors(residual, abs.(A) * abs.(batch), B))
+        @test factorization.componentwise_backward_error ≈ omega rtol = 1e-12
     end
 end

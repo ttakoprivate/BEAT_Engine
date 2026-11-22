@@ -223,12 +223,13 @@ mutable struct RefinedDenseLU
     componentwise_tolerance::Float64        # NaN when BLAB_COUPLED_DENSE_COMPONENTWISE=0
     estimated_error::Vector{Float64}   # per column of the last solve (see _dense_error_estimate)
     estimate_direction_check::Vector{Bool}
+    fallback_refinement_steps::Int     # most Float64 refinement steps after the fallback (any solve)
 end
 
 function RefinedDenseLU(matrix::Matrix{ComplexF64})
     all(isfinite, matrix) || throw(ArgumentError("dense coupled matrix has non-finite entries"))
     tolerance = _dense_componentwise_enabled() ? _dense_componentwise_tolerance(size(matrix, 1)) : NaN
-    refined = RefinedDenseLU(matrix, opnorm(matrix, Inf), nothing, nothing, 0, nothing, NaN, NaN, tolerance, Float64[], Bool[])
+    refined = RefinedDenseLU(matrix, opnorm(matrix, Inf), nothing, nothing, 0, nothing, NaN, NaN, tolerance, Float64[], Bool[], 0)
     if maximum(abs, matrix; init=0.0) > floatmax(Float32)
         _dense_fall_back!(refined, "an entry is outside the Float32 range")
     else
@@ -352,7 +353,8 @@ BeatEngineSplitDense.jl), or `lu_float64_fallback` after a refinement fallback),
 `dense_refinement_iterations`, `dense_refinement_fallback_reason` and `dense_refinement_backward_error`
 (the last solve's worst column, in units of the Float64 attainable backward error),
 `dense_refinement_componentwise_backward_error` (worst column ω of the last solve) and
-`dense_refinement_componentwise_tolerance` (`nothing` when `BLAB_COUPLED_DENSE_COMPONENTWISE=0`).
+`dense_refinement_componentwise_tolerance` (`nothing` when `BLAB_COUPLED_DENSE_COMPONENTWISE=0`) and
+`dense_refinement_fallback_steps` (Float64 refinement steps after a Float64 LU fallback, see `_refine_fallback!`).
 For the refined solvers (and after a `SplitGMRES` fallback) also `dense_estimated_relative_error`
 (worst excitation), `dense_estimated_relative_error_per_excitation` (`nothing` where not finite),
 `dense_estimate_direction_check_passed` and `dense_estimate_direction_check_passed_per_excitation`:
@@ -377,7 +379,8 @@ function _estimate_diagnostics(factorization)
 end
 
 _componentwise_diagnostics(factorization) =
-    ("dense_refinement_componentwise_backward_error" =>
+    ("dense_refinement_fallback_steps" => factorization.fallback_refinement_steps,
+     "dense_refinement_componentwise_backward_error" =>
          isfinite(factorization.componentwise_backward_error) ? factorization.componentwise_backward_error : nothing,
      "dense_refinement_componentwise_tolerance" =>
          isnan(factorization.componentwise_tolerance) ? nothing : factorization.componentwise_tolerance)
