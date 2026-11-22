@@ -19,9 +19,11 @@
 # Row check: on sampled rows i, r_asm = (b_64 - b_mix) - (A_64 - A_mix) x_prod. Small blocks
 # (mechanical, electrical) are checked in full; the BEM block by s rows drawn uniformly without
 # replacement (inclusion probability π = s / m_BEM). For a linear output y = gᴴ x, with
-# A_mixᴴ z = g (adjoint solve with the existing factor), the Horvitz-Thompson estimate of the
+# A_mixᴴ z = g (adjoint solve with the productive ComplexF32 LU factor of RefinedDenseLU; a dense
+# Float64 LU of A_mix serves as independent comparison), the Horvitz-Thompson estimate of the
 # assembly contribution is  Σ_i conj(z_i) r_asm_i / π_i  over the checked rows; the truth is
-# gᴴ (x_64 - x_mix). This prototype takes the rows from the full Float64 build; it measures the
+# gᴴ (x_64 - x_mix). Accuracy is reported as the complex relative error |estimate - truth| / |truth|
+# (phase included); outputs whose truth is exactly zero are listed separately. This prototype takes the rows from the full Float64 build; it measures the
 # statistics, not the cost of a row-wise Float64 reassembly (not implemented yet).
 # A control injects a relative perturbation into a few BEM rows of A_mix (a local assembly fault).
 #
@@ -71,22 +73,31 @@ function capture(s, ::Type{T}, f) where {T}
     A = F isa BeatEngineCoupledCondensed.RefinedDenseLU ? copy(F.matrix) :
         F isa LinearAlgebra.LU ? Matrix(F.P' * (F.L * F.U)) : error("unexpected factorization $(typeof(F))")
     ranges = (bem=system.bem_range, mechanical=system.mechanical_range, electrical=system.electrical_range)
-    result = (; A, b=recorder.rhs[], x=recorder.solution[], ranges, solver=typeof(F))
+    factor = F isa BeatEngineCoupledCondensed.RefinedDenseLU ? F.factor : nothing   # productive ComplexF32 LU
+    result = (; A, b=recorder.rhs[], x=recorder.solution[], ranges, solver=typeof(F), factor)
     release_condensed_coupled_system!(system)
     return result
 end
 
-pointwise(reference, candidate) = maximum(abs.(candidate .- reference) ./ max.(abs.(reference), floatmin()))
+# max pointwise complex relative error over the entries with a non-zero reference; exact zeros of
+# the reference are reported separately as (count, max absolute error)
+function pointwise(reference, candidate)
+    nonzero = .!iszero.(reference)
+    rel = any(nonzero) ? maximum(abs.(candidate[nonzero] .- reference[nonzero]) ./ abs.(reference[nonzero])) : NaN
+    zero_abs = any(.!nonzero) ? maximum(abs.(candidate[.!nonzero] .- reference[.!nonzero])) : 0.0
+    return rel, count(.!nonzero), zero_abs
+end
 
 function report_parts(mix, full, x_mix, x_64)
     println("  max pointwise complex relative error (worst entry of each output, per excitation):")
     @printf("  %-12s %-4s %12s %12s %12s\n", "output", "exc", "solver", "assembly", "total")
     for (name, range) in pairs(mix.ranges), k in axes(mix.x, 2)
         isempty(range) && continue
-        solver = pointwise(x_mix[range, k], mix.x[range, k])
-        assembly = pointwise(x_64[range, k], x_mix[range, k])
-        total = pointwise(x_64[range, k], mix.x[range, k])
-        @printf("  %-12s %-4d %12.3e %12.3e %12.3e\n", name, k, solver, assembly, total)
+        parts = (pointwise(x_mix[range, k], mix.x[range, k]), pointwise(x_64[range, k], x_mix[range, k]),
+                 pointwise(x_64[range, k], mix.x[range, k]))
+        @printf("  %-12s %-4d %12.3e %12.3e %12.3e", name, k, parts[1][1], parts[2][1], parts[3][1])
+        zeros_ = parts[2][2]
+        zeros_ > 0 ? @printf("   (%d exact zeros of x_64: max abs error %.3e)\n", zeros_, parts[3][3]) : println()
     end
 end
 
@@ -102,57 +113,80 @@ function row_estimate(r_asm, z, ranges, s, rng)
 end
 
 # Importance sampling (Poisson design): BEM row i is checked with probability
-# π_i = min(1, s w_i / Σ w), w_i = |z_i| (|A_mix| |x| + |b_mix|)_i, the expected size of
+# π_i = min(1, c w_i) with c chosen so that Σ π_i = s (expected sample size s after capping), w_i = |z_i| (|A_mix| |x| + |b_mix|)_i, the expected size of
 # |conj(z_i) r_asm_i| if every entry carries a relative assembly error of the same order. Needs only
 # the adjoint z and quantities of the mixed system; r_asm is then computed on the checked rows.
+function _inclusion_probabilities(w, s)
+    count(>(0), w) <= s && return Float64.(w .> 0)
+    lo, hi = 0.0, s / minimum(w[w .> 0])                         # Σ min(1, c w) is monotone in c
+    for _ in 1:200
+        c = (lo + hi) / 2
+        sum(min.(1.0, c .* w)) < s ? (lo = c) : (hi = c)
+    end
+    return min.(1.0, hi .* w)
+end
+
 function importance_estimate(r_asm, z, weights, ranges, s, rng)
     bem = collect(ranges.bem)
     small = vcat(collect(ranges.mechanical), collect(ranges.electrical))
-    w = weights[bem]
-    pi = min.(1.0, s .* w ./ sum(w))
+    pi = _inclusion_probabilities(weights[bem], s)
     chosen = rand(rng, length(bem)) .< pi
     return sum(conj.(z[small]) .* r_asm[small]) + sum(conj.(z[bem[chosen]]) .* r_asm[bem[chosen]] ./ pi[chosen]), count(chosen)
 end
 
+relative_to(estimate, truth) = abs(estimate - truth) / abs(truth)
+stats(v) = (median(v), minimum(v), maximum(v))
+
 function row_check(mix, full, x_mix, x_64; label, sizes=(16, 64, 256), seeds=1:20)
     n = size(mix.A, 1)
-    F = lu(mix.A)
+    # productive factor (as assembled) or, for the perturbed control, a ComplexF32 LU of that matrix
+    factor32 = something(mix.factor, lu(ComplexF32.(mix.A)))
+    factor64 = lu(mix.A)                                         # independent Float64 comparison
     bem = collect(mix.ranges.bem)
-    # outputs: current, velocity, the BEM node with the largest assembly error, two fixed BEM nodes
-    worst = bem[argmax(abs.(x_64[bem, 1] .- x_mix[bem, 1]) ./ abs.(x_64[bem, 1]))]
-    outputs = vcat(collect(mix.ranges.electrical), collect(mix.ranges.mechanical), [worst, bem[1], bem[end ÷ 2]])
-    names = vcat(["current"], ["velocity"], ["p_bem[worst]", "p_bem[1]", "p_bem[mid]"])
-    G = zeros(ComplexF64, n, length(outputs))
-    for (k, i) in enumerate(outputs); G[i, k] = 1; end
-    Z = F' \ G                                                   # adjoint solves A_mixᴴ z = g
     head = bem[1:min(64, length(bem))]
     small = vcat(collect(mix.ranges.mechanical), collect(mix.ranges.electrical))
+    names = ["current", "velocity", "p_bem[worst]", "p_bem[1]", "p_bem[mid]"]
     for e in axes(mix.x, 2)
-        println("  row check ($label), excitation $e: estimate / truth of the assembly contribution gᴴ(x_64 - x_mix)")
+        # outputs: current, velocity, the BEM node with the largest assembly error of this excitation, two fixed nodes
+        nonzero = filter(i -> !iszero(x_64[i, e]), bem)
+        worst = nonzero[argmax(abs.(x_64[nonzero, e] .- x_mix[nonzero, e]) ./ abs.(x_64[nonzero, e]))]
+        outputs = vcat(collect(mix.ranges.electrical), collect(mix.ranges.mechanical), [worst, bem[1], bem[end ÷ 2]])
+        G = zeros(ComplexF64, n, length(outputs))
+        for (k, i) in enumerate(outputs); G[i, k] = 1; end
+        Z = ComplexF64.(factor32' \ ComplexF32.(G))            # adjoint with the productive Float32 factor
+        Z64 = factor64' \ G
+        println("  row check ($label), excitation $e (worst BEM node $worst): complex relative error " *
+                "|estimate - truth| / |truth| of the assembly contribution gᴴ(x_64 - x_mix)")
         r_asm = (full.b[:, e] .- mix.b[:, e]) .- (full.A .- mix.A) * mix.x[:, e]
         truth = [transpose(G[:, k]) * (x_64[:, e] .- x_mix[:, e]) for k in axes(G, 2)]
-        linear = vec(sum(conj.(Z) .* r_asm; dims=1))             # all rows: first-order prediction
-        # deterministic baseline: small blocks plus the first 64 BEM rows, extrapolated
+        linear = vec(sum(conj.(Z) .* r_asm; dims=1))             # all rows, Float32 adjoint
+        linear64 = vec(sum(conj.(Z64) .* r_asm; dims=1))         # all rows, Float64 adjoint
         head64 = vec(sum(conj.(Z[small, :]) .* r_asm[small]; dims=1)) .+
                  (length(bem) / length(head)) .* vec(sum(conj.(Z[head, :]) .* r_asm[head]; dims=1))
-        @printf("  %-14s %12s %12s", "output", "|truth|", "all rows")
-        for s in sizes; @printf(" %22s", "s=$s median [min,max]"); end
-        @printf(" %18s %28s\n", "first 64 BEM rows", "importance s=64 med [min,max]")
+        @printf("  %-13s %10s %10s %10s", "output", "|truth|", "all(F32)", "all(F64)")
+        for s in sizes; @printf(" %24s", "s=$s med [min,max]"); end
+        @printf(" %9s %32s\n", "first64", "importance E[s]=64 med [min,max]")
         for k in axes(G, 2)
-            @printf("  %-14s %12.3e %12.3f", names[k], abs(truth[k]), abs(linear[k] / truth[k]))
-            for s in sizes
-                ratios = [abs(row_estimate(r_asm, Z, mix.ranges, s, MersenneTwister(seed))[k] / truth[k]) for seed in seeds]
-                @printf("   %6.2f [%5.2f,%6.2f]", median(ratios), minimum(ratios), maximum(ratios))
+            if iszero(truth[k])
+                @printf("  %-13s %10s  truth exactly 0: all-rows estimate %.3e (absolute)\n", names[k], "0", abs(linear[k]))
+                continue
             end
-            @printf(" %18.2f", abs(head64[k] / truth[k]))
+            @printf("  %-13s %10.3e %10.2e %10.2e", names[k], abs(truth[k]), relative_to(linear[k], truth[k]),
+                    relative_to(linear64[k], truth[k]))
+            for s in sizes
+                errors = [relative_to(row_estimate(r_asm, Z, mix.ranges, s, MersenneTwister(seed))[k], truth[k]) for seed in seeds]
+                @printf("    %6.2f [%5.2f,%7.2f]", stats(errors)...)
+            end
+            @printf(" %9.2f", relative_to(head64[k], truth[k]))
             scale = abs.(mix.A) * abs.(mix.x[:, e]) .+ abs.(mix.b[:, e])
             weights = abs.(Z[:, k]) .* scale
-            ratios = [abs(importance_estimate(r_asm, Z[:, k], weights, mix.ranges, 64, MersenneTwister(seed))[1] / truth[k])
-                      for seed in seeds]
-            @printf("      %6.2f [%5.2f,%6.2f]\n", median(ratios), minimum(ratios), maximum(ratios))
+            draws = [importance_estimate(r_asm, Z[:, k], weights, mix.ranges, 64, MersenneTwister(seed)) for seed in seeds]
+            errors = [relative_to(d[1], truth[k]) for d in draws]
+            sizes_drawn = [d[2] for d in draws]
+            @printf("   %6.2f [%5.2f,%7.2f] (rows %d-%d)\n", stats(errors)..., minimum(sizes_drawn), maximum(sizes_drawn))
         end
     end
-    println("  BEM rows: $(length(bem)) of n = $n; seeds per sample size: $(length(seeds)); ratio 1 = exact.")
+    println("  BEM rows: $(length(bem)) of n = $n; seeds per sample size: $(length(seeds)); 0 = exact, 1 = error as large as the truth.")
 end
 
 s32 = setup(Float32); s64 = setup(Float64)
@@ -165,7 +199,7 @@ for f in frequencies
     x_mix = lu(mix.A) \ mix.b
     x_64 = lu(full.A) \ full.b
     @printf("  Float64 build: recorded x vs P'LU-reconstructed solve, max rel %.3e (reconstruction check)\n",
-            pointwise(full.x, x_64))
+            pointwise(full.x, x_64)[1])
     report_parts(mix, full, x_mix, x_64)
     row_check(mix, full, x_mix, x_64; label="as assembled")
     # control: a local assembly fault, random relative error 1e-4 per entry on 3 BEM rows of A_mix
@@ -175,7 +209,7 @@ for f in frequencies
     A_fault = copy(mix.A)
     A_fault[faulty_rows, :] .*= 1 .+ 1e-4 .* randn(rng, ComplexF64, 3, size(A_fault, 2))
     x_fault = lu(A_fault) \ mix.b
-    fault = (; mix..., A=A_fault, x=x_fault)
+    fault = (; mix..., A=A_fault, x=x_fault, factor=nothing)   # adjoint: ComplexF32 LU of A_fault
     row_check(fault, full, x_fault, x_64; label="control: 3 BEM rows, random 1e-4 relative entry errors")
     @printf("  faulty rows: %s\n", string(faulty_rows))
 end
