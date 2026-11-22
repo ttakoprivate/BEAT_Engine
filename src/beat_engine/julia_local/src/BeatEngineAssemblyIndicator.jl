@@ -9,7 +9,7 @@ const Condensed = BeatEngineCoupledCondensed
 export sample_equations, sample_bem_rows, build_indicator_reference, capture_coupled_state,
     assembly_indicator, physical_fields
 
-const physical_fields = (:fem_pressure, :bem_pressure, :interface_flux, :diaphragm_velocity, :voice_coil_current)
+const physical_fields = (:fem_pressure, :bem_pressure, :interface_flux, :bem_neumann, :diaphragm_velocity, :voice_coil_current)
 
 """Build the independent FEM/recovery model without performing dense BEM quadrature."""
 function build_indicator_reference(fem, bem, interface, frequency::Float64, speed::Float64, density::Float64; kwargs...)
@@ -152,65 +152,53 @@ function relative_change(delta, ref)
     return abs(delta) / abs(ref)
 end
 
-function output_gradient(s, field, i)
-    g = zeros(ComplexF64, size(s.factorization, 1))
-    ranges = (bem_pressure=s.bem_range, diaphragm_velocity=s.mechanical_range, voice_coil_current=s.electrical_range)
-    if haskey(ranges, field)
-        g[getproperty(ranges, field)[i]] = 1
-        return g
+# Stratify acoustic equations by their largest normalized adjoint weight across
+# the requested driver outputs. Half the budget samples the highest fifth. Every
+# BEM row has positive inclusion probability; the driver equations are a census.
+function driver_sample(rng, system, state, dual, budget)
+    bem = collect(system.bem_range)
+    budget >= 1 || throw(ArgumentError("The BEM row budget must be positive."))
+    count = min(budget, length(bem))
+    n = length(state.x)
+    mechanical, electrical = system.mechanical_range, system.electrical_range
+    if count <= 1 || count == length(bem)
+        return sample_equations(rng, n, (bem, mechanical, electrical),
+                                (count, length(mechanical), length(electrical)))
     end
-    e = s.interface_elimination_data
-    pressure = zeros(ComplexF64, length(e.bem_of_gamma))
-    if field === :interface_flux
-        if hasproperty(e, :mass_operator)
-            for (block, schur) in zip(e.mass_operator.blocks, e.schur_blocks)
-                j = findfirst(==(i), block.dofs)
-                isnothing(j) || (pressure[block.rows] .= conj.(schur[j, :]))
-            end
-        else
-            pressure .= conj.(e.schur_solution[i, :])
+    scale = abs.(state.rhs[bem])
+    matrix = system.factorization.matrix
+    for j in eachindex(state.x)
+        magnitude = abs(state.x[j])
+        for (i, row) in enumerate(bem)
+            scale[i] += abs(matrix[row, j]) * magnitude
         end
-        isempty(s.mechanical_range) || (g[s.mechanical_range] .= conj.(e.motion_solution[i, :]))
-    elseif field === :fem_pressure
-        c = s.condensation
-        retained = findfirst(==(i), c.retained_vertices)
-        if isnothing(retained)
-            interior = findfirst(==(i), c.interior_vertices)
-            basis = zeros(ComplexF64, c.interior_count)
-            basis[interior] = 1
-            dual = c.factorization' \ basis
-            pressure .= -(c.interior_retained' * dual)
-            if c.transducer_condensed && !isempty(s.mechanical_range)
-                g[s.mechanical_range] .= conj(CoreBEM.neumann_scale(s.density, s.omega)) .* (c.motion_interior' * dual)
-            end
-        else
-            pressure[retained] = 1
-        end
-    else
-        throw(ArgumentError("Unsupported physical output $field."))
     end
-    for (j, vertex) in enumerate(e.bem_of_gamma)
-        g[s.bem_range[vertex]] += pressure[j]
+    score = zeros(length(bem))
+    for z in eachcol(dual)
+        w = abs.(z[bem]) .* scale
+        peak = maximum(w)
+        iszero(peak) || (score .= max.(score, w ./ peak))
     end
-    return g
+    high_count = cld(length(bem), 5)
+    order = sortperm(score; rev=true)
+    high, rest = bem[order[1:high_count]], bem[order[high_count+1:end]]
+    take = clamp(cld(count, 2), max(1, count-length(rest)), min(length(high), count-1))
+    return sample_equations(rng, n, (high, rest, mechanical, electrical),
+                            (take, count-take, length(mechanical), length(electrical)))
 end
 
 """
-    assembly_indicator(mixed, reference, excitation, state, sample; output_indices=nothing)
+    assembly_indicator(mixed, reference, excitation, state, sample=nothing; bem_budget=32, rng, output_indices)
 
-CPU prototype for flux-eliminated, in-memory split LU. The caller builds an
-independent Float64 reference from the original inputs, passing identity BEM A
-and zero C to the normal builder. Its FEM, interface, loads and output recovery
-remain physical. Only the sampled BEM rows are then evaluated with quadrature.
-
-The scalar per field is a first-order estimate of the largest pointwise complex
-relative change for this draw. It is not a bound. Reuse one forward solve to
-locate peaks across all field components, then evaluate those linear outputs
-with adjoint solves using the same existing factor. The signed assembly
-residual excludes the mixed algebraic residual. Supply one fixed index per
-field to evaluate preselected outputs on an independent draw.
+Estimate complex assembly errors in diaphragm velocity and voice-coil current for
+one excitation. Use the existing split factor for the adjoints and independently
+assemble the selected Float64 equations, including the RHS. The returned
+per-driver corrections and sampling standard errors are diagnostic estimates.
+Pressure and flux require an independent dense check at the control frequencies.
+An explicit probability sample supports calibration against all equations.
 """
-function assembly_indicator(mixed, reference, excitation, state, sample; output_indices=nothing)
+function assembly_indicator(mixed, reference, excitation, state, sample=nothing;
+                            bem_budget=32, rng=Random.default_rng(), output_indices=nothing)
     mixed.interface_elimination === reference.interface_elimination === :flux ||
         throw(ArgumentError("The prototype requires matching flux-eliminated systems."))
     f = mixed.factorization
@@ -231,6 +219,29 @@ function assembly_indicator(mixed, reference, excitation, state, sample; output_
         isfinite(a) && isfinite(b) && isapprox(a, b; rtol=8eps(Float32)) ||
             throw(ArgumentError("Mismatched model input $key."))
     end
+    ranges = (; diaphragm_velocity=mixed.mechanical_range, voice_coil_current=mixed.electrical_range)
+    if !isnothing(output_indices)
+        all(k -> haskey(ranges, k), keys(output_indices)) ||
+            throw(ArgumentError("Row estimates are available for driver current and velocity only."))
+    end
+    targets = Tuple{Symbol,Int,Int}[]
+    for (field, range) in pairs(ranges)
+        isempty(range) && continue
+        !isnothing(output_indices) && !haskey(output_indices, field) && continue
+        indices = isnothing(output_indices) ? eachindex(range) : (output_indices[field],)
+        for i in indices
+            push!(targets, (field, i, range[i]))
+        end
+    end
+    isempty(targets) && throw(ArgumentError("The system has no driver outputs to estimate."))
+    goals = zeros(ComplexF32, length(state.x), length(targets))
+    for (j, (_, _, row)) in enumerate(targets)
+        goals[row, j] = 1
+    end
+    dual = ComplexF64.(f.factor' \ goals)
+    if isnothing(sample)
+        sample = driver_sample(rng, mixed, state, dual, bem_budget)
+    end
     rows, pi = sample.rows, sample.probability
     length(rows) == length(pi) && allunique(rows) && all(p -> 0 < p <= 1, pi) ||
         throw(ArgumentError("Invalid sampled rows or inclusion probabilities."))
@@ -244,31 +255,21 @@ function assembly_indicator(mixed, reference, excitation, state, sample; output_
     defect[.!isbem] = ref_at_x.rhs[other] - factored_rows_product(reference.factorization, other, state.x)
     mixed_residual = state.rhs[rows] - f.matrix[rows, :] * state.x
     assembly_residual = defect - mixed_residual
-    moved = if isnothing(output_indices)
-        weighted = zeros(ComplexF64, length(state.x))
-        weighted[rows] = assembly_residual ./ pi
-        correction = ComplexF64.(f.factor \ ComplexF32.(weighted))
-        replay(reference, excitation, state.x + correction).fields
-    end
     fields = Dict{Symbol,NamedTuple}()
-    for field in physical_fields
-        old = getproperty(state.fields, field)
-        isempty(old) && continue
-        index = if isnothing(output_indices)
-            predicted = getproperty(moved, field)
-            argmax(relative_change.(predicted .- old, predicted))
-        else
-            output_indices[field]
+    per_driver = Dict(field => NamedTuple[] for field in keys(ranges))
+    for (j, (field, index, _)) in enumerate(targets)
+        old = getproperty(state.fields, field)[index]
+        direct = getproperty(ref_at_x.fields, field)[index] - old
+        delta, stderr = project_output(sample, view(dual, :, j), assembly_residual, direct)
+        predicted = old + delta
+        item = (; index, delta, relative=relative_change(delta, predicted), absolute=abs(delta), direct,
+                sampling_stderr=stderr, inconclusive=iszero(predicted) || abs(delta) <= stderr)
+        push!(per_driver[field], item)
+        if !haskey(fields, field) || item.relative > fields[field].relative
+            fields[field] = item
         end
-        g = output_gradient(reference, field, index)
-        adjoint_state = ComplexF64.(f.factor' \ ComplexF32.(g))
-        direct = getproperty(ref_at_x.fields, field)[index] - old[index]
-        delta, stderr = project_output(sample, adjoint_state, assembly_residual, direct)
-        fields[field] = (; index, delta, relative=relative_change(delta, old[index] + delta),
-                         absolute=abs(delta), direct, sampling_stderr=stderr,
-                         inconclusive=iszero(old[index] + delta) || abs(delta) <= stderr)
     end
-    return (; fields, assembly_residual, mixed_residual, rows, probability=pi)
+    return (; fields, per_driver, assembly_residual, mixed_residual, rows, probability=pi)
 end
 
 end

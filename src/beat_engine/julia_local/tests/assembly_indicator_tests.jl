@@ -47,3 +47,24 @@ const AIE = BeatEngineAssemblyIndicator
     @test AIE.relative_change(2im, 1im) == 2
     @test_throws DomainError AIE.relative_change(1, NaN)
 end
+
+@testset "Driver-only stratification" begin
+    n = 12
+    sys = (bem_range=1:8, mechanical_range=9:10, electrical_range=11:12,
+           factorization=(matrix=Matrix{ComplexF64}(I,n,n),))
+    state = (x=ones(ComplexF64,n), rhs=zeros(ComplexF64,n))
+    adjoints = zeros(ComplexF64,n,4)
+    adjoints[2,1] = 1
+    adjoints[7,4] = 1e-8im
+    draw(budget) = AIE.driver_sample(MersenneTwister(3), sys, state, adjoints, budget)
+    sample = draw(5)
+    @test sort(sample.rows[1:2]) == [2,7]
+    @test sample.probability[1:2] == [1,1]
+    @test sample.probability[3:5] == fill(0.5,3)
+    @test sample.rows[end-3:end] == collect(9:12)
+    @test sample == draw(5)
+    @test draw(1).probability[1] == 1/8
+    @test draw(100).rows == collect(1:n)
+    @test all(isone, draw(8).probability)
+    @test_throws ArgumentError draw(0)
+end
