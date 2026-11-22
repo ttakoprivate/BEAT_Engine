@@ -328,8 +328,8 @@ function _refined_solve!(factorization::RefinedDenseLU, target, residual)
                       _componentwise_note(factorization))
         _dense_fall_back!(factorization, reason)
     end
-    solution = factorization.fallback \ target
-    _, normwise = _dense_acceptance!(residual, factorization, target, solution)
+    solution, normwise = _refine_fallback!(x -> _dense_acceptance!(residual, factorization, target, x),
+                                           factorization.fallback, factorization.fallback \ target, residual, factorization)
     factorization.backward_error = maximum(normwise; init=0.0)
     return solution
 end
@@ -340,7 +340,7 @@ using ..BeatEngineCoupled: SplitDenseMatrix, adopt_square_storage, SplitRefinedL
     _dense_spill_target, _dense_gmres_ir_enabled, _split_mul!, _split_opnorm_inf, _split_materialize,
     _split_precondition_double, _dense_error_estimate_enabled, _dense_error_estimate,
     _dense_componentwise_enabled, _dense_componentwise_tolerance, _dense_abs_product, _acceptance_ratios,
-    _componentwise_backward_errors,
+    _componentwise_backward_errors, _refine_fallback!,
     _componentwise_note
 
 """

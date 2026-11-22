@@ -153,6 +153,40 @@ end
 # Cost: one matrix product and two solves with the existing factor.
 # Scope: solver error for the assembled system, not discretization or assembly error.
 # BLAB_DENSE_ERROR_ESTIMATE=0 skips it.
+# After the Float64 LU fallback: up to FALLBACK_REFINEMENT_STEPS steps of fixed-precision refinement
+# with that LU while the combined acceptance ratio (normwise and componentwise) exceeds 1 and
+# decreases. One such step already makes a backward-stable LU solution componentwise stable under
+# mild conditions (Skeel 1980); a large element growth can otherwise leave ω above the tolerance.
+# A step that does not lower the ratio is discarded. If the ratio still exceeds 1 the solution is
+# returned with a warning and a note in `fallback_reason` (the Float64 LU is the last resort; the
+# achieved ω is in the diagnostics). With BLAB_COUPLED_DENSE_COMPONENTWISE=0 nothing changes. `acceptance!(x)` recomputes `residual` for x and returns
+# (ratios, normwise); on return `residual` belongs to the returned solution.
+const FALLBACK_REFINEMENT_STEPS = 2
+
+function _refine_fallback!(acceptance!, fallback, solution, residual, factorization)
+    ratios, normwise = acceptance!(solution)
+    isnan(factorization.componentwise_tolerance) && return solution, normwise   # test off: previous behaviour
+    steps = 0
+    while steps < FALLBACK_REFINEMENT_STEPS && all(isfinite, normwise) && maximum(ratios; init=0.0) > 1
+        previous = maximum(ratios)
+        candidate = solution .+ (fallback \ residual)
+        candidate_ratios, candidate_normwise = acceptance!(candidate)
+        if !(maximum(candidate_ratios; init=0.0) < previous)
+            ratios, normwise = acceptance!(solution)     # discard the step, restore the residual
+            break
+        end
+        solution, ratios, normwise = candidate, candidate_ratios, candidate_normwise
+        steps += 1
+    end
+    if maximum(ratios; init=0.0) > 1 && !isnan(factorization.componentwise_tolerance)
+        note = "componentwise backward error $(factorization.componentwise_backward_error) above the tolerance " *
+               "$(factorization.componentwise_tolerance) after the Float64 LU and $steps refinement step(s)"
+        factorization.fallback_reason = something(factorization.fallback_reason, "Float64 LU") * "; " * note
+        @warn note
+    end
+    return solution, normwise
+end
+
 const DENSE_ESTIMATE_MAX_CONTRACTION = 0.5
 _dense_error_estimate_enabled() = !(lowercase(strip(get(ENV, "BLAB_DENSE_ERROR_ESTIMATE", "1"))) in ("0", "off", "false"))
 
@@ -765,8 +799,8 @@ function _split_solve_columns!(factorization::SplitRefinedLU, target::Matrix{Com
         end
         _split_fall_back!(factorization, reason)
     end
-    solution = factorization.fallback \ target
-    _, normwise = _split_acceptance!(residual, factorization, target, solution)
+    solution, normwise = _refine_fallback!(x -> _split_acceptance!(residual, factorization, target, x),
+                                           factorization.fallback, factorization.fallback \ target, residual, factorization)
     factorization.backward_error = maximum(normwise; init=0.0)
     return solution
 end

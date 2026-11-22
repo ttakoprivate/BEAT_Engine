@@ -545,3 +545,32 @@ end
         @test_throws ErrorException SD._dense_componentwise_tolerance(10)
     end
 end
+
+@testset "Float64 fallback is refined to the componentwise tolerance (Codex review on PR #15)" begin
+    split_of(dense) = (n = size(dense, 1); m = SD.SplitDenseMatrix(n, 1:n, 1:n);
+                       for j in 1:n, i in 1:n; m[i, j] = dense[i, j]; end; m)
+    # Wilkinson-type growth matrix (partial-pivoting growth 2⁵⁹): the Float64 LU solution alone has
+    # ω ≈ 0.07 and relative error ≈ 1; scaled by 1e39 so that the Float32 path falls back at once.
+    n = 60
+    W = Matrix{ComplexF64}(I, n, n)
+    for i in 2:n, j in 1:(i - 1); W[i, j] = -1; end
+    W[:, n] .= 1
+    W .*= 1e39
+    rng = MersenneTwister(41)
+    exact = randn(rng, ComplexF64, n, 2)
+    rhs = W * exact
+    plain = lu(W) \ rhs
+    @test maximum(abs.(plain .- exact) ./ abs.(exact)) > 0.1                 # the unrefined fallback
+    for build in (() -> SD.SplitRefinedLU(split_of(W)), () -> SD.RefinedDenseLU(copy(W)))
+        factorization = @test_logs (:warn, r"outside the Float32 range") match_mode=:any build()
+        @test !isnothing(factorization.fallback)
+        solution = factorization \ rhs
+        @test factorization.componentwise_backward_error <= factorization.componentwise_tolerance
+        @test maximum(abs.(solution .- exact) ./ abs.(exact)) < 1e-12
+        @test !occursin("above the tolerance", factorization.fallback_reason)
+        @test vec(factorization \ rhs[:, 1]) ≈ solution[:, 1] rtol = 1e-12   # vector right-hand side
+        # with the componentwise test off, the fallback solution is returned unrefined as before
+        legacy = withenv(build, "BLAB_COUPLED_DENSE_COMPONENTWISE" => "0")
+        @test maximum(abs.((legacy \ rhs) .- exact) ./ abs.(exact)) > 0.1
+    end
+end
