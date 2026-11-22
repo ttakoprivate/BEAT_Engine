@@ -21,60 +21,42 @@
     22
   ],
   "lease": {
-    "holder": "work20-mws7ig3r",
-    "acquired_at": "2026-11-22T19:05:15.783Z",
-    "expires_at": "2026-11-22T20:35:15.783Z",
+    "holder": null,
+    "acquired_at": null,
+    "expires_at": null,
     "fencing_token": 4
   },
   "last_completed_run": {
-    "id": "work19-mws5cnq3",
-    "started_at": "2026-11-22T18:04:46.491Z",
-    "completed_at": "2026-11-22T18:13:41.661Z",
-    "status": "driver_reference_fix_verified",
+    "id": "work20-mws7ig3r",
+    "started_at": "2026-11-22T19:05:15.783Z",
+    "completed_at": "2026-11-22T19:06:44.492Z",
+    "status": "incoming_claude_review_scope_blocker_confirmed",
+    "source_commit": "a62cae98841c95d1981f8768423c39db9637daf1",
     "checked_heads": {
       "3": "10b86e208872cb795dcb7f972eec2d6a12ed09ec",
+      "8": "7b898757893770e319cb3af57f1dc144d46f79d4",
       "9": "3d639cef853f6c60caa36fda4a8b39f28baec3f7",
       "13": "a15bfb13997eca5b2eee3b2b7eda66932297230b",
       "14": "e9af918a436f93afdb630f06af539d08f45f46c8",
       "15": "a82f907dd17688baae9851690f04aa419745b04e",
       "17": "ab90c26aebfdc79fd85bc0b777413a17e558f004"
     },
-    "results": {
-      "checker_tests": {
-        "passed": 45,
-        "exit_code": 0
-      },
-      "independent_reference": {
-        "passed": 378,
-        "exit_code": 0,
-        "unchanged_test_commit": "ab90c26aebfdc79fd85bc0b777413a17e558f004"
-      },
-      "source_changes": false,
-      "pr17_body_updated": true
-    },
+    "source_changes": false,
+    "tests_rerun": false,
     "actions": [
       {
-        "pr": 3,
-        "id": 7083427714,
-        "url": "https://github.com/ttakoprivate/BEAT_Engine/pull/3#issuecomment-7083427714"
-      },
-      {
-        "pr": 14,
-        "id": 7083429255,
-        "url": "https://github.com/ttakoprivate/BEAT_Engine/pull/14#issuecomment-7083429255"
-      },
-      {
-        "pr": 17,
-        "id": 7083426199,
-        "url": "https://github.com/ttakoprivate/BEAT_Engine/pull/17#issuecomment-7083426199"
+        "issue": 16,
+        "id": 7084110833,
+        "url": "https://github.com/ttakoprivate/BEAT_Engine/issues/16#issuecomment-7084110833"
       }
     ],
+    "evidence": "Claude comment 7083590474 confirms that chatgpt PR review is outside the authorized scope of the existing Claude routine, even when linked through an issue.",
     "pending": [
-      "Claude full independent reviews of PR14 and PR17 deferred to owner session; bounded first partial review requested in PR14.",
-      "PR3 fix must be merged by owner before target hmatrix-dev gains it.",
-      "VACS example/format pending in issue12; h343 and Metal/CUDA qualification remain separate."
+      "Owner of the existing Claude routine must authorize reading/reviewing chatgpt PRs and explicit draft-review requests; concrete amendment posted once in issue16.",
+      "PR14/17 remain pending independent review; h343 hardware qualification remains separate.",
+      "VACS input example and format decisions remain pending in issue12."
     ],
-    "limits": "CPU fixture and binary-dump regression; original two complete solver-hook dumps and conjugated CLI branch not separately rerun. No hardware qualification or general accuracy guarantee."
+    "continuation": "Execution and GitHub access work. Continue checking for new assigned work and Claude changes; normal external approval/data waits do not require stopping this worker. Do not repeat unchanged blocker notices or owner questions."
   },
   "note": "Coordination state only. Read project code from the assigned source branch. Acquire and update this lease through expected-SHA branch updates; do not merge this branch."
 }
