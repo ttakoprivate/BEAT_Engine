@@ -136,8 +136,8 @@ end
 # A verified reference must be a full Float64 run of the same physical model: Float64 model data,
 # CPU (Float64) BEM assembly, Float64 dense matrix and factor. The model fingerprint compares the BEM
 # mesh (topology and tags exactly, coordinates up to Float32 rounding), the non-BEM-operator part of the
-# system (FEM, interface, transducer rows: coil resistance etc.) and the interface operator (sizes must
-# match); the right-hand sides are compared per excitation (explicit zero handling).
+# system (FEM, interface, transducer rows: coil resistance etc.), the interface operator (sizes must
+# match) and the wavenumber (medium, up to Float32 rounding); the right-hand sides are compared per excitation (explicit zero handling).
 function check_truth(truth, d)
     meta(x, key) = hasproperty(x, key) ? string(getproperty(x, key)) : "missing"
     unchecked = get(ENV, "HMAT_TRUTH_UNCHECKED", "0") == "1"
@@ -149,6 +149,11 @@ function check_truth(truth, d)
     startswith(meta(truth, :dense_solver), "lu_float64") ||
         push!(problems, "truth dense_solver = $(meta(truth, :dense_solver)) (a Float64 LU required)")
     truth.frequency_hz == d.frequency_hz || push!(problems, "frequency $(truth.frequency_hz) vs $(d.frequency_hz)")
+    # wavenumber = what the BEM operator is built with: catches a different sound speed (medium) at the same
+    # frequency; tolerance allows only the Float32 rounding of the same input (k = 2*pi*f/c)
+    kt, kd = Float64(truth.wavenumber), Float64(d.wavenumber)
+    abs(kt - kd) > 8 * eps(Float32) * max(abs(kt), abs(kd)) &&
+        push!(problems, "wavenumber $(kt) vs $(kd) (different sound speed/medium?)")
     reldiff(a, b) = (na = max(norm(a), norm(b)); iszero(na) ? 0.0 : norm(a - b) / na)
     # geometry: same BEM topology and tags exactly; coordinates equal up to Float32 rounding of the same input
     mt, md = truth.bem_mesh, d.bem_mesh
