@@ -51,6 +51,19 @@ label(t, d) = try check_truth(t, d) catch; "rejected" end
         @test label(base, base) == "verified Float64 dump"
         @test !accepted(merge(base, (; regular_quadrature_order=2, wavenumber=NaN)), base)  # other checks still apply
     end
+    # driver coupling operator bem_motion_flux (review of f9485da): reversed driver sign, sizes, no driver
+    G = sparse(ComplexF64[0.5 0; 0 -0.25]); withG = merge(base, (; bem_motion_flux=G))
+    @test accepted(withG, withG)
+    @test accepted(withG, merge(base, (; bem_motion_flux=sparse(ComplexF64.(ComplexF32.(Matrix(G)))))))  # Float32 rounding
+    @test !accepted(withG, merge(base, (; bem_motion_flux=-G)))                                 # reversed driver sign
+    @test !accepted(withG, merge(base, (; bem_motion_flux=G[:, 1:1])))                          # other driver count
+    @test !accepted(withG, merge(base, (; bem_motion_flux=[G; spzeros(ComplexF64, 1, 2)])))     # other size
+    @test !accepted(withG, merge(base, (; bem_motion_flux=nothing)))                            # driver in one only
+    @test !accepted(withG, base)                                                                # field missing
+    @test !accepted(merge(base, (; bem_motion_flux=nothing)), withG)
+    @test !accepted(withG, merge(base, (; bem_motion_flux=sparse(ComplexF64[NaN 0; 0 -0.25]))))
+    @test accepted(merge(base, (; bem_motion_flux=nothing)), base)                              # no driver in both
+    @test accepted(merge(base, (; bem_motion_flux=spzeros(ComplexF64, 2, 0))), base)            # no driver columns
     withenv("HMAT_TRUTH_UNCHECKED" => "1") do
         @test label(merge(base, (; singular_order=2)), base) == "UNCHECKED reference"
     end

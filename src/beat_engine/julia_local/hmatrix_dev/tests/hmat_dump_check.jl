@@ -137,7 +137,7 @@ end
 # CPU (Float64) BEM assembly, Float64 dense matrix and factor. The model fingerprint compares the BEM
 # mesh (topology and tags exactly, coordinates up to Float32 rounding), the non-BEM-operator part of the
 # system (FEM, interface, transducer rows: coil resistance etc.), the interface operator (sizes must
-# match), the wavenumber (medium, up to Float32 rounding; NaN/Inf rejected), the regular and singular
+# match), the driver coupling operator bem_motion_flux (sizes must match), the wavenumber (medium, up to Float32 rounding; NaN/Inf rejected), the regular and singular
 # quadrature orders and the symmetry mode (exactly); the right-hand sides are compared per excitation (explicit zero handling).
 function check_truth(truth, d)
     meta(x, key) = hasproperty(x, key) ? string(getproperty(x, key)) : "missing"
@@ -189,6 +189,22 @@ function check_truth(truth, d)
             push!(problems, "interface operator differs by $(m)")
         end
     end
+    # membrane-motion (driver) coupling operator, stored separately from rest/bem_flux (review of f9485da:
+    # a reversed driver sign changed rest by only 7e-5 but this operator by 2). No driver = nothing/missing,
+    # equivalent only to an operator without columns.
+    motion(x) = (hasproperty(x, :bem_motion_flux) && x.bem_motion_flux !== nothing) ? x.bem_motion_flux : nothing
+    gt, gd = motion(truth), motion(d)
+    if gt === nothing || gd === nothing
+        other = gt === nothing ? gd : gt
+        (other === nothing || size(other, 2) == 0) ||
+            push!(problems, "driver coupling operator present in one dump only ($(size(other)))")
+    elseif size(gt) != size(gd)
+        push!(problems, "driver coupling operator size $(size(gt)) vs $(size(gd))")
+    elseif !(all(isfinite, gt) && all(isfinite, gd))
+        push!(problems, "driver coupling operator has non-finite entries")
+    elseif (m = reldiff(gt, gd)) > 1e-4
+        push!(problems, "driver coupling operator differs by $(m) (different driver/sign?)")
+    end
     if size(truth.rhs) != size(d.rhs)
         push!(problems, "rhs size $(size(truth.rhs)) vs $(size(d.rhs))")
     else
@@ -214,7 +230,8 @@ end
 if haskey(ENV, "HMAT_TRUTH_DIR")
     truth = hmat_load(ENV["HMAT_TRUTH_DIR"])
     ec < ep && (truth = merge(truth, (rhs=conj.(truth.rhs), dense_solution=conj.(truth.dense_solution),
-                                      rest=conj.(truth.rest), bem_flux=conj.(truth.bem_flux))))  # as d above
+                                      rest=conj.(truth.rest), bem_flux=conj.(truth.bem_flux),
+                                      bem_motion_flux=truth.bem_motion_flux === nothing ? nothing : conj.(truth.bem_motion_flux))))  # as d above
     label = check_truth(truth, d)
     tr = truth.dense_solution
     nexc = min(size(d.rhs, 2), parse(Int, get(ENV, "HMAT_EST_NEXC", "6")))
