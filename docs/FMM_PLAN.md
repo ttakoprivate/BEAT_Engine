@@ -443,22 +443,38 @@ Reference: CPU beat_cpu with `solver_options.precision=float64`. Float32: Metal 
 | 20, dump run (`interface_elimination=none`, no refinement step) | 0.039 / 0.161 / 7.74 | 3.2e-3 | 3.3e-4 | 3.9e-7 |
 
 Correction of the earlier note: the 1-2 % / 12-16 % boundary errors and the multi-dB null errors belong to the
-unrefined Float32 path used for the H-matrix dumps, not to the normal fork run. With the default split refinement the
-Float32 result matches Float64 to about 1e-4 relative (deep nulls <= 0.08 dB) over 10-20 kHz on this model. The
-reported `dense_refinement_backward_error` was 5.9e-4 (10 kHz) and 1.8e-4 (20 kHz).
+dump runs (`BLAB_COUPLED_DENSE_SPLIT=off`, both interface eliminations off, interface radiation off), not to the
+normal fork run. With the default split refinement the Float32 result matches Float64 to about 1e-4 relative
+(deep nulls <= 0.08 dB) over 10-20 kHz on this model.
 
-Consequence for the error indicator: the refinement step already has the ingredients of an a-posteriori estimate
-(Float64 residual + one correction). The size of that correction, mapped through the output operators, bounds the
-error of the unrefined iterate; for the refined result it is a conservative upper bound. Next: log the correction
-norm per output, and compare it with the true error on the dumps (unrefined x32 vs f64).
+**Cause of the dump-run error (found 2026-11-22 with the solver error estimate of PR #2):** not the Float32
+assembly. `RefinedDenseLU` accepted the first Float32 LU solution with 0 refinement steps, because its
+backward-error test is normwise (ratio 0.455 <= 1), while the forward error was 0.9-13 % per excitation. The new
+estimate (Mac, Metal, same settings, 20 kHz, 20 excitations, all marked reliable) against the true error of the
+same configuration vs Float64 (max |err| / max |ref|, dominated by the flux unknowns q):
+
+| excitation | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
+|---|---|---|---|---|---|---|---|
+| true | 9.2e-3 | 1.0e-2 | 1.3e-1 | 1.2e-2 | 7.2e-2 | 4.8e-2 | 1.1e-1 |
+| estimate | 9.2e-3 | 1.0e-2 | 1.26e-1 | 1.17e-2 | 7.25e-2 | 4.81e-2 | 1.15e-1 |
+
+In the default split path the estimate is 1e-9 .. 5e-9 (10 and 20 kHz), while the result differs from the full
+Float64 run by ~3e-5 .. 7e-5: that remainder is Float32 assembly / Float32 storage of the dense block, which the
+solver estimate does not see by design. Follow-ups: (a) let the refinement continue while the estimate is above
+a tolerance (a numerical change: separate PR); (b) an assembly indicator. Row sampling was tried on the dump
+(64 exact Float64 BEM rows, residual norm extrapolated, random-direction amplification): it underestimated the
+residual by ~300x and the error by ~30x, so it is not usable. The full Float64 residual against the H operator
+plus one correction (section below) does work; it costs one H build per checked frequency.
 
 ## Review of 3190c88 (ChatGPT agent, 2026-11-21) and fixes (branch claude/hmatrix-review-fixes)
 
 1. **Dump checker estimate scope.** The residual re-evaluates only the BEM operator rows (A, C) through the
    H operator; `rest` (FEM, interface, transducer rows) and the right-hand side are taken from the dump being
    checked. Errors in those blocks are not seen (reviewer's 2x2 transducer block example: estimate 0, true 25 %).
-   The checker now prints this scope. The 20 kHz table above stays valid for what it measures (error in the
-   BEM operator part, which dominates for the h343 model), not as a total-error estimate.
+   The checker now prints this scope. In the 20 kHz dump the residual against the H operator lies mostly
+   outside the BEM rows (3.5e-7 total vs 5e-8 on BEM rows); the estimate still matched the true error there
+   because `rest` and the right-hand side are exact in Float64 in that dump and the error came from the solver
+   acceptance (see above), not from those blocks.
 2. **`near_factor` below the element size counted adjacent pairs twice** (Duffy added for all adjacent pairs,
    regular value removed only inside the radius search; 17 % / 46 % boundary-pressure error at 0.25). Fixed:
    the regular value of every adjacent pair is removed in the `cache.pairs` loop. Regression test in

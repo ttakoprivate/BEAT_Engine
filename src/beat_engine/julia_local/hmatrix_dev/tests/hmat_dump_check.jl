@@ -173,3 +173,33 @@ if haskey(ENV, "HMAT_TRUTH_DIR")
         println()
     end
 end
+
+# ---- row-sampling assembly indicator prototype (env HMAT_ROWSAMPLE=1) ----
+# Cheap alternative to the full H residual: only the s dumped BEM rows are re-evaluated exactly (Float64),
+# Δr_s = (A64 - A_engine)[rows, :] x. Full residual norm extrapolated as sqrt(nB/s) |Δr_s|; the error is
+# propagated with the amplification of the solver on a random vector of that norm.
+# Compared with the full H residual (all rows) and with the true error vs the Float64 dump.
+if get(ENV, "HMAT_ROWSAMPLE", "0") == "1"
+    s = length(r)
+    Iq = d.bem_iface_rows   # engine interface rows (already conjugated above when needed)
+    Ar = d.bem_lhs_rows
+    ec < ep && (Ar = conj.(Ar))
+    Ex = ec < ep ? E : E      # exact rows in the oracle convention (d is converted to it above)
+    rng = MersenneTwister(5)
+    println("\n== row-sampling assembly indicator (s = $s of $nB BEM rows)")
+    for c in 1:min(size(d.rhs, 2), parse(Int, get(ENV, "HMAT_EST_NEXC", "4")))
+        xs = d.dense_solution[:, c]; b = d.rhs[:, c]
+        dr_s = (Ex - Ar) * xs[B] .+ (Cq - Iq) * xs[Q]
+        rfull = b - hmul_coupled(xs)                              # full residual vs the H operator
+        est_norm = sqrt(nB / s) * norm(dr_s)
+        z = randn(rng, ComplexF64, n); z[setdiff(1:n, B)] .= 0; z .*= est_norm / norm(z)
+        dz, _ = gmres(Am, D * z; N=Pm, ldiv=false, rtol=1e-3, atol=0.0, memory=100, itmax=15)
+        df, _ = gmres(Am, D * rfull; N=Pm, ldiv=false, rtol=1e-3, atol=0.0, memory=100, itmax=15)
+        @printf("   exc %d: |Δr| sampled-extrapolated %.2e vs full-H %.2e (BEM rows %.2e);", c, est_norm, norm(rfull), norm(rfull[B]))
+        if haskey(ENV, "HMAT_TRUTH_DIR")
+            e = tr[:, c] - xs
+            @printf(" error rel: true %.1e, full-H correction %.1e, random-direction %.1e", norm(e) / norm(tr[:, c]), norm(df) / norm(xs), norm(dz) / norm(xs))
+        end
+        println()
+    end
+end
