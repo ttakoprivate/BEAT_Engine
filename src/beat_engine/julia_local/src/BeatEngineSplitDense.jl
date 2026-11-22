@@ -54,6 +54,68 @@ end
 _dense_gmres_ir_enabled() = lowercase(strip(get(ENV, "BLAB_COUPLED_DENSE_GMRES_IR", "1"))) in ("1", "on", "true", "auto")
 
 const SPLIT_REFINEMENT_MAX_ITERATIONS = 10       # as DENSE_REFINEMENT_MAX_ITERATIONS
+
+# A-posteriori solver-error estimate after an accepted solve (diagnostics only, the solution is
+# not changed). From the final Float64 residual r:
+#   d = M⁻¹ r                 (M: the factor the solver used; d ≈ x_exact - x when M⁻¹A ≈ I)
+#   w = M⁻¹ (A d),  ρ = |w - d| / |d|      (how far M⁻¹A is from I in the direction of d)
+# Per excitation the estimate is |d| / (1 - ρ) / |x| when ρ <= 1/2, else |d| / |x|.
+# The flag `direction_check_passed` (ρ <= 1/2) is a cheap heuristic, not a guarantee: it tests M⁻¹A
+# only in the direction of d. A badly rounded Float32 pivot in components that d hardly touches can
+# pass it while the estimate is far too small (review case: 384x). It must not on its own release
+# automatic decisions (e.g. skipping a Float64 recompute); that needs a factorization-based safeguard.
+# Residual columns are scaled by a power of two chosen so that d is O(1) in the Float32 solve, so
+# tiny or huge excitations neither underflow nor overflow; a non-finite estimate is stored as NaN,
+# reported as `nothing` (JSON null) and fails the check. A solution that vanished for a non-zero
+# excitation reports the exact relative error 1; a correction that underflowed although the residual
+# does not vanish reports `nothing`; a residual of at least half the right-hand side fails the check.
+# Cost: one matrix product and two solves with the existing factor.
+# Scope: solver error for the assembled system, not discretization or assembly error.
+# BLAB_DENSE_ERROR_ESTIMATE=0 skips it.
+const DENSE_ESTIMATE_MAX_CONTRACTION = 0.5
+_dense_error_estimate_enabled() = !(lowercase(strip(get(ENV, "BLAB_DENSE_ERROR_ESTIMATE", "1"))) in ("0", "off", "false"))
+
+_pow2_exponent(m) = (iszero(m) || !isfinite(m)) ? 0 : exponent(m)
+
+# 2^k per column with |r| 2^k ≈ |b| / |x|, so that M⁻¹ (r 2^k) ≈ O(1) when M⁻¹ maps |b| to |x|.
+_residual_scales(residual, target, solution) =
+    [exp2(-_pow2_exponent(norm(view(residual, :, j), Inf)) + _pow2_exponent(norm(view(target, :, j), Inf)) -
+          _pow2_exponent(norm(view(solution, :, j), Inf))) for j in axes(residual, 2)]
+
+"""
+    _dense_error_estimate(apply, multiply, solution, residual, target) -> (estimates, direction_check_passed)
+
+`apply(r)` applies the solver's factor M⁻¹, `multiply(y)` returns `A y` in Float64, `residual` is
+the final residual `target - A solution`. See the comment above `DENSE_ESTIMATE_MAX_CONTRACTION`.
+"""
+function _dense_error_estimate(apply, multiply, solution::AbstractMatrix, residual::AbstractMatrix,
+                               target::AbstractMatrix)
+    scales = _residual_scales(residual, target, solution)
+    d = apply(residual .* transpose(scales))          # scaled d; unscaled below
+    w = apply(multiply(d))
+    estimates = Float64[]; passed = Bool[]
+    for j in axes(solution, 2)
+        rn = norm(view(residual, :, j), Inf); bn = norm(view(target, :, j), Inf)
+        xn = norm(view(solution, :, j), Inf)
+        if iszero(xn) && !iszero(bn)
+            # the solution vanished for a non-zero excitation: the relative error is exactly 1
+            push!(estimates, 1.0); push!(passed, false); continue
+        end
+        e = norm(view(d, :, j), Inf)
+        if iszero(e) && !iszero(rn)
+            # the correction underflowed although the residual does not vanish: unknown
+            push!(estimates, NaN); push!(passed, false); continue
+        end
+        rho = iszero(e) ? 0.0 : norm(view(w, :, j) - view(d, :, j), Inf) / e
+        x = max(xn, floatmin(Float64))
+        ok = isfinite(rho) && rho <= DENSE_ESTIMATE_MAX_CONTRACTION
+        estimate = (ok ? e / (1 - rho) : e) / scales[j] / x
+        # a residual of the size of the right-hand side means the solution is not trustworthy either
+        push!(passed, ok && isfinite(estimate) && !(rn >= bn / 2 && !iszero(rn)))
+        push!(estimates, isfinite(estimate) ? estimate : NaN)
+    end
+    return estimates, passed
+end
 const DENSE_GMRES_IR_RESTART = 30
 const DENSE_GMRES_IR_MAX_CYCLES = 10
 const DENSE_SPLIT_PANEL_BYTES = 256 * 1024^2     # ComplexF64 panel used by the residual product
@@ -309,8 +371,11 @@ end
 `store` is the `ComplexF32` copy of `hi` (in RAM or memory-mapped); it is promoted one column panel
 at a time, so the product streams `store` once.
 """
+const SPLIT_MUL_CALLS = Threads.Atomic{Int}(0)    # full matrix streams; read by the tests
+
 function _split_mul!(result::AbstractMatrix{ComplexF64}, store::AbstractMatrix{ComplexF32}, matrix::SplitDenseMatrix,
                      x::AbstractMatrix{ComplexF64}, alpha::ComplexF64, beta::ComplexF64)
+    Threads.atomic_add!(SPLIT_MUL_CALLS, 1)
     n = size(store, 1)
     width = max(1, min(size(store, 2), DENSE_SPLIT_PANEL_BYTES ÷ (16 * n)))
     panel = Matrix{ComplexF64}(undef, n, width)
@@ -389,6 +454,8 @@ mutable struct SplitRefinedLU
     gmres_iterations::Int
     fallback_reason::Union{Nothing,String}
     backward_error::Float64
+    estimated_error::Vector{Float64}          # per column of the last solve, see _dense_error_estimate
+    estimate_direction_check::Vector{Bool}
     spill_path::Union{Nothing,String}
     # A factor held elsewhere (the CUDA LU on the device): `device_solve(x::Matrix{ComplexF32})`
     # returns the ComplexF64 host solution, `release_device()` frees it. `factor` is then nothing.
@@ -409,7 +476,7 @@ function SplitRefinedLU(matrix::SplitDenseMatrix)
     spill_directory = _dense_spill_target(n)
     matrix_norm = _split_opnorm_inf(matrix.hi, matrix)
     store, spill_path = isnothing(spill_directory) ? (matrix.hi, nothing) : _split_spill(matrix.hi, spill_directory)
-    refined = SplitRefinedLU(matrix, store, matrix_norm, nothing, nothing, 0, 0, nothing, NaN, spill_path,
+    refined = SplitRefinedLU(matrix, store, matrix_norm, nothing, nothing, 0, 0, nothing, NaN, Float64[], Bool[], spill_path,
                              nothing, nothing)
     if matrix.overflow
         _split_fall_back!(refined, "an entry is outside the Float32 range")
@@ -442,7 +509,7 @@ function SplitRefinedLU(matrix::SplitDenseMatrix, device_solve::Function, releas
     matrix_norm = _split_opnorm_inf(matrix.hi, matrix)
     store, spill_path = isnothing(spill_directory) ? (matrix.hi, nothing) : _split_spill(matrix.hi, spill_directory)
     isnothing(spill_path) || (matrix.hi = Matrix{ComplexF32}(undef, 0, 0))
-    return SplitRefinedLU(matrix, store, matrix_norm, nothing, nothing, 0, 0, nothing, NaN,
+    return SplitRefinedLU(matrix, store, matrix_norm, nothing, nothing, 0, 0, nothing, NaN, Float64[], Bool[],
                           spill_path, device_solve, release_device)
 end
 
@@ -528,7 +595,21 @@ function Base.:\(factorization::SplitRefinedLU, rhs::AbstractVecOrMat)
 end
 
 function _split_solve_columns(factorization::SplitRefinedLU, target::Matrix{ComplexF64})
-    residual = similar(target)
+    residual = similar(target)          # holds the final residual on every successful exit
+    solution = _split_solve_columns!(factorization, target, residual)
+    if _dense_error_estimate_enabled()
+        apply = isnothing(factorization.fallback) ? (r -> _split_precondition(factorization, r)) :
+                                                    (r -> factorization.fallback \ r)
+        multiply = y -> _split_mul!(similar(y), factorization.store, factorization.matrix, y, one(ComplexF64), zero(ComplexF64))
+        factorization.estimated_error, factorization.estimate_direction_check =
+            _dense_error_estimate(apply, multiply, solution, residual, target)
+    else
+        factorization.estimated_error, factorization.estimate_direction_check = Float64[], Bool[]
+    end
+    return solution
+end
+
+function _split_solve_columns!(factorization::SplitRefinedLU, target::Matrix{ComplexF64}, residual)
     if isnothing(factorization.fallback)
         solution = _split_precondition(factorization, target)
         previous = Inf

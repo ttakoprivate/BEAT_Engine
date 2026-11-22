@@ -216,11 +216,13 @@ mutable struct RefinedDenseLU
     iterations::Int
     fallback_reason::Union{Nothing,String}
     backward_error::Float64
+    estimated_error::Vector{Float64}   # per column of the last solve (see _dense_error_estimate)
+    estimate_direction_check::Vector{Bool}
 end
 
 function RefinedDenseLU(matrix::Matrix{ComplexF64})
     all(isfinite, matrix) || throw(ArgumentError("dense coupled matrix has non-finite entries"))
-    refined = RefinedDenseLU(matrix, opnorm(matrix, Inf), nothing, nothing, 0, nothing, NaN)
+    refined = RefinedDenseLU(matrix, opnorm(matrix, Inf), nothing, nothing, 0, nothing, NaN, Float64[], Bool[])
     if maximum(abs, matrix; init=0.0) > floatmax(Float32)
         _dense_fall_back!(refined, "an entry is outside the Float32 range")
     else
@@ -265,6 +267,22 @@ function Base.:\(factorization::RefinedDenseLU, rhs::AbstractVecOrMat)
     all(isfinite, rhs) || throw(ArgumentError("dense coupled right-hand side has non-finite entries"))
     target = ComplexF64.(rhs)
     residual = similar(target)
+    solution = _refined_solve!(factorization, target, residual)
+    if _dense_error_estimate_enabled()     # `residual` is the final residual on every exit
+        apply = isnothing(factorization.fallback) ? (r -> ComplexF64.(factorization.factor \ ComplexF32.(r))) :
+                                                    (r -> factorization.fallback \ r)
+        multiply = y -> factorization.matrix * y
+        factorization.estimated_error, factorization.estimate_direction_check =
+            _dense_error_estimate(apply, multiply, solution isa AbstractVector ? reshape(solution, :, 1) : solution,
+                                  residual isa AbstractVector ? reshape(residual, :, 1) : residual,
+                                  target isa AbstractVector ? reshape(target, :, 1) : target)
+    else
+        factorization.estimated_error, factorization.estimate_direction_check = Float64[], Bool[]
+    end
+    return solution
+end
+
+function _refined_solve!(factorization::RefinedDenseLU, target, residual)
     if isnothing(factorization.fallback)
         solution = ComplexF64.(factorization.factor \ ComplexF32.(target))
         previous = Inf
@@ -302,7 +320,7 @@ end
 # shared with the CUDA coupled path.
 using ..BeatEngineCoupled: SplitDenseMatrix, adopt_square_storage, SplitRefinedLU, SplitGMRES, _dense_solver_mode, release_split_factor!, _dense_split_enabled,
     _dense_spill_target, _dense_gmres_ir_enabled, _split_mul!, _split_opnorm_inf, _split_materialize,
-    _split_precondition_double
+    _split_precondition_double, _dense_error_estimate_enabled, _dense_error_estimate
 
 """
     dense_solver_diagnostics(system) -> Dict{String,Any}
@@ -312,11 +330,27 @@ The dense coupled factorization that ran: `dense_solver` (`lu_float32`, `lu_floa
 BeatEngineSplitDense.jl), or `lu_float64_fallback` after a refinement fallback),
 `dense_refinement_iterations`, `dense_refinement_fallback_reason` and `dense_refinement_backward_error`
 (the last solve's worst column, in units of the Float64 attainable backward error).
+For the refined solvers (and after a `SplitGMRES` fallback) also `dense_estimated_relative_error`
+(worst excitation), `dense_estimated_relative_error_per_excitation` (`nothing` where not finite),
+`dense_estimate_direction_check_passed` and `dense_estimate_direction_check_passed_per_excitation`:
+an a-posteriori estimate of the solver's relative error for the assembled system (not discretization
+or assembly error) and a heuristic check of it, see `_dense_error_estimate`.
+`BLAB_DENSE_ERROR_ESTIMATE=0` skips it.
 """
 function dense_solver_diagnostics(system)
     diagnostics = _dense_solver_diagnostics(system)
     hasproperty(system, :dense_lhs_adopted) && (diagnostics["dense_lhs_adopted"] = system.dense_lhs_adopted)
     return diagnostics
+end
+
+# non-finite estimates (NaN) are reported as `nothing` (JSON null); the worst is taken over the finite ones
+function _estimate_diagnostics(factorization)
+    estimates = factorization.estimated_error
+    finite = filter(isfinite, estimates)
+    return ("dense_estimated_relative_error" => isempty(finite) ? nothing : maximum(finite),
+            "dense_estimated_relative_error_per_excitation" => Union{Nothing,Float64}[isfinite(e) ? e : nothing for e in estimates],
+            "dense_estimate_direction_check_passed" => isempty(estimates) ? nothing : all(factorization.estimate_direction_check),
+            "dense_estimate_direction_check_passed_per_excitation" => factorization.estimate_direction_check)
 end
 
 function _dense_solver_diagnostics(system)
@@ -333,6 +367,8 @@ function _dense_solver_diagnostics(system)
             "dense_gmres_solve_s" => factorization.solve_seconds,
             "dense_gmres_matvec_s" => factorization.matvec_seconds,
             "dense_refinement_fallback_reason" => factorization.fallback_reason,
+            # after a fallback the LU's estimate is the relevant one; without it GMRES gives none
+            (isnothing(factorization.fallback) ? () : _estimate_diagnostics(factorization.fallback))...,
         )
     end
     if factorization isa SplitRefinedLU
@@ -343,6 +379,7 @@ function _dense_solver_diagnostics(system)
             "dense_refinement_iterations" => factorization.iterations,
             "dense_refinement_fallback_reason" => factorization.fallback_reason,
             "dense_refinement_backward_error" => isnan(factorization.backward_error) ? nothing : factorization.backward_error,
+            _estimate_diagnostics(factorization)...,
             "dense_gmres_ir_iterations" => factorization.gmres_iterations,
             "dense_split_border_columns" => length(factorization.matrix.border_columns),
             "dense_split_border_rows" => length(factorization.matrix.border_rows),
@@ -357,6 +394,7 @@ function _dense_solver_diagnostics(system)
             "dense_refinement_iterations" => factorization.iterations,
             "dense_refinement_fallback_reason" => factorization.fallback_reason,
             "dense_refinement_backward_error" => isnan(factorization.backward_error) ? nothing : factorization.backward_error,
+            _estimate_diagnostics(factorization)...,
             "dense_lu_library" => dense_lu_library_diagnostic(ComplexF32),
         )
     end

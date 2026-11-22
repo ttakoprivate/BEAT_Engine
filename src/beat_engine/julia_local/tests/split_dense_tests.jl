@@ -3,7 +3,7 @@
 # last-resort Float64 fallback.
 isdefined(@__MODULE__, :BeatEngineCoupledCondensed) ||
     include(joinpath(@__DIR__, "coupled_condensed_test_setup.jl"))
-using Test, LinearAlgebra, Random
+using Test, LinearAlgebra, Random, JSON
 
 const SD = BeatEngineCoupledCondensed
 
@@ -236,7 +236,11 @@ end
         solution = (@test_logs (:warn,) match_mode=:any solver \ rhs)
         @test solver.fallback isa SD.SplitRefinedLU
         @test norm(solution - reference) / norm(reference) < 1e-12
-        @test SD.dense_solver_diagnostics((factorization=solver,))["dense_solver"] == "gmres_fallback_lu"
+        diagnostics = SD.dense_solver_diagnostics((factorization=solver,))
+        @test diagnostics["dense_solver"] == "gmres_fallback_lu"
+        # the fallback LU's error estimate is passed through
+        @test diagnostics["dense_estimated_relative_error_per_excitation"] == solver.fallback.estimated_error
+        @test !isempty(solver.fallback.estimated_error) && diagnostics["dense_estimate_direction_check_passed"] === true
     end
 end
 
@@ -304,4 +308,133 @@ end
         @test SD.SplitRefinedLU(adopted) \ rhs ≈ dense_build(f) \ rhs rtol = 1e-10
     end
     @test_throws ArgumentError SD.adopt_square_storage(Ptr{Cvoid}(1), 5, 4)
+end
+
+@testset "a-posteriori error estimate tracks the true solver error" begin
+    relative_error(x, exact) = [Float64(maximum(abs, x[:, j] - exact[:, j]) / maximum(abs, exact[:, j])) for j in axes(x, 2)]
+    # every row and column on the Float64 border: the split matrix holds A exactly
+    split_of(dense) = (n = size(dense, 1); m = SD.SplitDenseMatrix(n, 1:n, 1:n);
+                       for j in 1:n, i in 1:n; m[i, j] = dense[i, j]; end; m)
+    setprecision(BigFloat, 160) do
+        for condition in (1e3, 1e6, 1e8)
+            rng = MersenneTwister(21)
+            f = split_fixture(rng, 100, 8; condition)
+            dense = dense_build(f)
+            rhs = randn(rng, ComplexF64, f.n, 3)
+            exact = Complex{BigFloat}.(dense) \ Complex{BigFloat}.(rhs)
+            for factorization in (SD.SplitRefinedLU(split_build(f)), SD.RefinedDenseLU(copy(dense)))
+                solution = factorization \ rhs
+                truth = relative_error(solution, exact)
+                estimate = factorization.estimated_error
+                passed = factorization.estimate_direction_check
+                @test length(estimate) == 3 && all(isfinite, estimate)
+                # κ eps(Float32) < 1: the Float32 factor is a good inverse and every column passes the direction check
+                condition <= 1e6 && @test all(passed)
+                # a column that passes the check is within a factor 10 of the true error on every path
+                # (refined, GMRES-IR, Float64 fallback); at κ = 1e8 columns may fail it
+                @test all(.!passed .| (0.1 .<= estimate ./ max.(truth, floatmin()) .<= 10))
+                diagnostics = SD.dense_solver_diagnostics((factorization=factorization,))
+                @test diagnostics["dense_estimated_relative_error"] == maximum(estimate)
+                @test diagnostics["dense_estimated_relative_error_per_excitation"] == estimate
+                @test diagnostics["dense_estimate_direction_check_passed"] === all(passed)
+            end
+        end
+        # review case 1: a tiny excitation must not drop the estimate to zero (residual scaled before Float32)
+        A = ComplexF64[1 0; (1 + eps()) 2.0^-25]
+        s = 2.0^-99
+        B = (1 + im) .* [1.0 s; 1.0 s]
+        for factorization in (SD.SplitRefinedLU(split_of(A)), SD.RefinedDenseLU(copy(A)))
+            factorization \ B
+            e = factorization.estimated_error
+            @test e[2] > 0 && isapprox(e[2], e[1]; rtol=1e-6)
+        end
+        # review case 2: a Float32 pivot shifted by rounding makes M⁻¹A far from I; the estimate
+        # underestimates by 32x / 2048x here and the direction check must fail
+        for tail in (2.0^-28, 2.0^-34)
+            a = 1 + 2.0^-24
+            A2 = ComplexF64[1 a; 1 (a + tail)]
+            b = reshape((1 + im) .* [1, 1 + eps()], 2, 1)
+            exact = Complex{BigFloat}.(A2) \ Complex{BigFloat}.(b)
+            for factorization in (SD.SplitRefinedLU(split_of(A2)), SD.RefinedDenseLU(copy(A2)))
+                x = factorization \ b
+                truth = relative_error(x, exact)[1]
+                ok = 0.1 <= factorization.estimated_error[1] / max(truth, floatmin()) <= 10
+                @test ok || !factorization.estimate_direction_check[1]
+                @test !factorization.estimate_direction_check[1]
+            end
+        end
+    end
+    # review 2, case 1: tiny but normal-range entries must give a finite estimate; non-finite ones are
+    # reported as JSON null (the driver writes the diagnostics with JSON)
+    for scale in (1.0, 2.0^-125)
+        A = scale .* ComplexF64[1 -16; 0 1]
+        b = reshape(scale * (1 + im) .* [1, 1 + eps()], 2, 1)
+        exact = Complex{BigFloat}.(A) \ Complex{BigFloat}.(b)
+        for factorization in (SD.SplitRefinedLU(split_of(A)), SD.RefinedDenseLU(copy(A)))
+            x = factorization \ b
+            e = factorization.estimated_error[1]
+            truth = setprecision(() -> relative_error(x, exact)[1], BigFloat, 160)
+            @test isfinite(e) && e <= max(10 * truth, 1e-15)
+            text = JSON.json(SD.dense_solver_diagnostics((factorization=factorization,)))
+            @test JSON.parse(text)["dense_estimated_relative_error"] == e
+        end
+    end
+    for factorization in (SD.SplitRefinedLU(split_of(ComplexF64[1 0; 0 1])), SD.RefinedDenseLU(ComplexF64[1 0; 0 1]))
+        factorization \ ComplexF64[1 1; 2.0^-1024 0]
+        parsed = JSON.parse(JSON.json(SD.dense_solver_diagnostics((factorization=factorization,))))
+        @test all(e -> e === nothing || isfinite(e), parsed["dense_estimated_relative_error_per_excitation"])
+    end
+    # review 3: a vanished solution (x = 0 for b = floatmin) must not report error 0
+    for bval in (floatmin(Float64), 2.0^-1024)
+        for factorization in (SD.SplitRefinedLU(split_of(reshape(ComplexF64[1], 1, 1))), SD.RefinedDenseLU(reshape(ComplexF64[1], 1, 1)))
+            x = factorization \ ComplexF64[bval]
+            parsed = JSON.parse(JSON.json(SD.dense_solver_diagnostics((factorization=factorization,))))
+            if iszero(x[1])
+                @test parsed["dense_estimated_relative_error_per_excitation"][1] == 1.0
+                @test parsed["dense_estimate_direction_check_passed"] === false
+            else
+                @test parsed["dense_estimated_relative_error_per_excitation"][1] <= 1e-15
+            end
+        end
+    end
+    for factorization in (SD.SplitRefinedLU(split_of(reshape(ComplexF64[1], 1, 1))), SD.RefinedDenseLU(reshape(ComplexF64[1], 1, 1)))
+        x = factorization \ ComplexF64[2.0^-1021]       # control: solved exactly
+        @test x[1] == 2.0^-1021 && factorization.estimated_error[1] == 0 && factorization.estimate_direction_check[1]
+    end
+    # review 2, case 2: a decoupled third equation hides the shifted pivot of the first two from the
+    # direction check (estimate 384x too small). Known limitation of the heuristic, documented in
+    # _dense_error_estimate; a factorization-based safeguard is needed before automatic decisions.
+    setprecision(BigFloat, 160) do
+        a = 1 + 2.0^-24
+        c = 2.0^-25
+        A3 = ComplexF64[1 a 0; 1 (a + 2.0^-34) 0; 0 0 c]
+        b3 = reshape((1 + im) .* [1, 1 + eps(), c * (1 + 2.0^-27)], 3, 1)
+        for factorization in (SD.SplitRefinedLU(split_of(A3)), SD.RefinedDenseLU(copy(A3)))
+            factorization \ b3
+            @test_broken !factorization.estimate_direction_check[1]
+        end
+    end
+    # cost: the estimate adds exactly one matrix product per solve, also on a reused factor
+    rng = MersenneTwister(13)
+    f = split_fixture(rng, 200, 8; condition=1e6)
+    rhs = randn(rng, ComplexF64, f.n, 2)
+    products(enabled) = withenv("BLAB_DENSE_ERROR_ESTIMATE" => enabled ? "1" : "0") do
+        factorization = SD.SplitRefinedLU(split_build(f))
+        counts = Int[]
+        for b in (rhs, zero(rhs))
+            before = parentmodule(SD.SplitRefinedLU).SPLIT_MUL_CALLS[]
+            factorization \ b
+            push!(counts, parentmodule(SD.SplitRefinedLU).SPLIT_MUL_CALLS[] - before)
+        end
+        counts
+    end
+    @test products(true) == products(false) .+ 1
+    withenv("BLAB_DENSE_ERROR_ESTIMATE" => "0") do
+        rng = MersenneTwister(1)
+        f = split_fixture(rng, 60, 4)
+        factorization = SD.SplitRefinedLU(split_build(f))
+        factorization \ randn(rng, ComplexF64, f.n, 2)
+        @test isempty(factorization.estimated_error)
+        @test SD.dense_solver_diagnostics((factorization=factorization,))["dense_estimated_relative_error"] === nothing
+    end
 end
