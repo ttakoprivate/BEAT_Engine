@@ -244,6 +244,11 @@ function aca_batched(states::Vector{ACAState}, entries, tol::Float64)
             Threads.@threads for t in eachindex(colS)
                 s = colS[t]; c = vals[off[t]+1:off[t+1]] ./ s.scale
                 for q in eachindex(s.U); c .-= conj(s.V[q][s.j]) .* s.U[q]; end
+                mc = maximum(abs, c; init=0.0)              # dynamic rescale, as in `aca`
+                if isfinite(mc) && !iszero(mc) && abs(exponent(mc)) > 100
+                    g = exp2(exponent(mc)); s.scale *= g; c ./= g; s.norm2 /= g^2
+                    for q in eachindex(s.U); s.U[q] ./= g; end
+                end
                 v = conj.(s.r ./ s.piv)
                 cross = 0.0 + 0im
                 for q in eachindex(s.U); cross += dot(s.U[q], c) * dot(v, s.V[q]); end

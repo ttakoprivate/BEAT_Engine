@@ -57,6 +57,13 @@ function aca(row, col, m::Int, n::Int, tol::Float64; maxrank::Int=min(m, n))
         end
         c = Vector{ComplexF64}(col(j)) ./ scale
         for t in eachindex(U); c .-= conj(V[t][j]) .* U[t]; end
+        # rescale dynamically (power of two, exact) when the new column is far from O(1): the first row can
+        # be tiny compared with the rest of the block (review: [2^-520 0; 1 1] overflowed the squared norm)
+        mc = maximum(abs, c; init=0.0)
+        if isfinite(mc) && !iszero(mc) && abs(exponent(mc)) > 100
+            g = exp2(exponent(mc)); scale *= g; c ./= g; norm2 /= g^2
+            for t in eachindex(U); U[t] ./= g; end
+        end
         v = conj.(r ./ piv)
         # update ||S||^2 incrementally
         cross = 0.0 + 0im

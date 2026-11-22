@@ -17,6 +17,16 @@ aca_of(A, tol; kw...) = aca(i -> A[i, :], j -> A[:, j], size(A)..., tol; kw...)
     end
 end
 
+@testset "ACA: tiny first row, O(1) rest of the block (dynamic rescale)" begin
+    for a in (2.0^-520, 2.0^-1000, 2.0^520)
+        A = ComplexF64[a 0; 1 1]
+        U, V = aca_of(A, 1e-5)
+        x = ComplexF64[1, 1]
+        @test size(U, 2) == 2
+        @test all(abs.(U * (V' * x) - A * x) .<= 1e-12 .* abs.(A * x))
+    end
+end
+
 @testset "ACA: an empty start row does not consume the rank budget" begin
     A = reshape(ComplexF64[0, 1 + im, 2 - im], 3, 1)
     U, V = aca_of(A, 1e-5; maxrank=1)
@@ -51,6 +61,12 @@ if Base.find_package("KernelAbstractions") !== nothing && Base.find_package("Ada
         A = reshape(ComplexF64[0, 1 + im, 2 - im], 3, 1)
         U, V = batched_of(A, 1e-5)
         @test norm(U * V' - A) <= 1e-12 * norm(A)
+        for a in (2.0^-520, 2.0^-1000, 2.0^520)
+            A = ComplexF64[a 0; 1 1]
+            U, V = batched_of(A, 1e-5)
+            x = ComplexF64[1, 1]
+            @test all(abs.(U * (V' * x) - A * x) .<= 1e-12 .* abs.(A * x))
+        end
     end
 else
     @info "KernelAbstractions not on the load path: batched ACA tests skipped"

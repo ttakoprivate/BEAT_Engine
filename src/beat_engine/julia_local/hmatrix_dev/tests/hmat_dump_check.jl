@@ -134,9 +134,10 @@ end
 # entries). `rest` (FEM, interface, transducer rows) and the right-hand side come from the dump being
 # checked, so errors in those blocks are NOT seen by this estimate.
 # A verified reference must be a full Float64 run of the same physical model: Float64 model data,
-# CPU (Float64) BEM assembly, Float64 dense matrix and factor. The model fingerprint compares the
-# non-BEM-operator part of the system (FEM, interface, transducer rows: coil resistance etc.) and the
-# interface operators; the right-hand sides are compared per excitation (explicit zero handling).
+# CPU (Float64) BEM assembly, Float64 dense matrix and factor. The model fingerprint compares the BEM
+# mesh (topology and tags exactly, coordinates up to Float32 rounding), the non-BEM-operator part of the
+# system (FEM, interface, transducer rows: coil resistance etc.) and the interface operator (sizes must
+# match); the right-hand sides are compared per excitation (explicit zero handling).
 function check_truth(truth, d)
     meta(x, key) = hasproperty(x, key) ? string(getproperty(x, key)) : "missing"
     unchecked = get(ENV, "HMAT_TRUTH_UNCHECKED", "0") == "1"
@@ -149,12 +150,25 @@ function check_truth(truth, d)
         push!(problems, "truth dense_solver = $(meta(truth, :dense_solver)) (a Float64 LU required)")
     truth.frequency_hz == d.frequency_hz || push!(problems, "frequency $(truth.frequency_hz) vs $(d.frequency_hz)")
     reldiff(a, b) = (na = max(norm(a), norm(b)); iszero(na) ? 0.0 : norm(a - b) / na)
+    # geometry: same BEM topology and tags exactly; coordinates equal up to Float32 rounding of the same input
+    mt, md = truth.bem_mesh, d.bem_mesh
+    if length(mt.vertices) != length(md.vertices) || mt.faces != md.faces || mt.physical_tags != md.physical_tags
+        push!(problems, "BEM mesh topology/tags differ ($(length(mt.vertices)) vs $(length(md.vertices)) vertices)")
+    else
+        extent = maximum(v -> maximum(abs, v), mt.vertices)
+        shift = maximum(i -> maximum(abs, mt.vertices[i] - md.vertices[i]), eachindex(mt.vertices))
+        shift > 8 * eps(Float32) * extent &&
+            push!(problems, "BEM mesh coordinates differ by up to $(shift) (more than Float32 rounding)")
+    end
     if size(truth.rest) != size(d.rest)
         push!(problems, "system size $(size(truth.rest)) vs $(size(d.rest))")
     else
         (m = reldiff(truth.rest, d.rest)) > 1e-4 && push!(problems, "model fingerprint: non-BEM system part differs by $(m) (different transducer/FEM data?)")
-        size(truth.bem_flux) == size(d.bem_flux) && (m = reldiff(truth.bem_flux, d.bem_flux)) > 1e-4 &&
+        if size(truth.bem_flux) != size(d.bem_flux)
+            push!(problems, "interface operator size $(size(truth.bem_flux)) vs $(size(d.bem_flux))")
+        elseif (m = reldiff(truth.bem_flux, d.bem_flux)) > 1e-4
             push!(problems, "interface operator differs by $(m)")
+        end
     end
     if size(truth.rhs) != size(d.rhs)
         push!(problems, "rhs size $(size(truth.rhs)) vs $(size(d.rhs))")

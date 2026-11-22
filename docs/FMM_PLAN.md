@@ -483,7 +483,8 @@ plus one correction (section below) does work; it costs one H build per checked 
    `tests/fmm_operator_tests.jl` (fails before, passes after).
 3. **ACA stop was absolute for tiny blocks** (`eps()` floor on the squared norm; s = 1e-16 diagonal block lost a
    rank). Now relative only, in `aca` and `aca_batched`; entries are scaled by a power of two from the first
-   non-zero row so the squared norms do not under-/overflow (1e-170, 1e160 tested).
+   non-zero row and rescaled dynamically when a new column is far from O(1), so the squared norms do not
+   under-/overflow (1e-170, 1e160 and a 2^-520 first row in an O(1) block tested).
 4. **An empty start row consumed the rank budget in scalar ACA.** Only accepted rank-1 terms count now.
    Tests for 3 and 4: `hmatrix_dev/tests/hmat_aca_test.jl` (scalar and batched).
 5. **`FmmCoupledSolve \ b` returned an unconverged GMRES iterate.** It now throws `FmmNotConvergedError`
@@ -491,7 +492,8 @@ plus one correction (section below) does work; it costs one H build per checked 
 6. **A Float32 dump could pass as Float64 truth.** The dump hook records `model_scalar_type`, `bem_backend`,
    `assembly_eltype`, `solution_eltype`, `solver_scalar_type` and `dense_solver`. A verified reference must be
    a full Float64 run (Float64 model, CPU BEM assembly, Float64 matrix and LU). The checker also compares a
-   model fingerprint (the non-BEM-operator system part, e.g. coil resistance, and the interface operator) and
+   model fingerprint (BEM mesh topology and tags exactly and coordinates up to Float32 rounding; the
+   non-BEM-operator system part, e.g. coil resistance; the interface operator, sizes included) and
    the right-hand side per excitation with explicit zero handling (second review: 6 vs 12 Ohm and swapped weak
    excitations had passed). `HMAT_TRUTH_UNCHECKED=1` overrides, e.g. for dumps written before this change.
 7. The checker and tests include the H files from `hmatrix_dev/` in the repository layout and from their own
