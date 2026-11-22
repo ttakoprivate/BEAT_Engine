@@ -12,8 +12,10 @@ V = [SVector(0.0, 0, 0), SVector(1.0, 0, 0), SVector(0.0, 1, 0)]
 mesh(v) = BoundaryMesh(v, [(1, 2, 3)], [7])
 base = (model_scalar_type=:Float64, bem_backend=:cpu, assembly_eltype=:ComplexF64, solver_scalar_type=:Float64,
         solution_eltype=:ComplexF64, dense_solver=:lu_float64, frequency_hz=2000.0, wavenumber=2pi * 2000 / 343, rest=sparse([1.0+0im 0; 0 1]),
-        bem_flux=sparse(ComplexF64[1 0; 0 1]), rhs=ComplexF64[1 0; 0 1], bem_mesh=mesh(V))
+        bem_flux=sparse(ComplexF64[1 0; 0 1]), rhs=ComplexF64[1 0; 0 1], bem_mesh=mesh(V),
+        regular_quadrature_order=1, singular_order=1, symmetry_mode=:none)
 accepted(t, d) = try check_truth(t, d); true catch; false end
+label(t, d) = try check_truth(t, d) catch; "rejected" end
 
 @testset "check_truth" begin
     @test accepted(base, base)
@@ -34,4 +36,22 @@ accepted(t, d) = try check_truth(t, d); true catch; false end
     @test !accepted(base, merge(base, (; wavenumber=2pi * 2000 / 330)))
     @test !accepted(base, merge(base, (; wavenumber=2pi * 2000 / 342)))
     @test !accepted(base, merge(base, (; wavenumber=2pi * 2000 / 342.99)))
+    # invalid wavenumbers (review of f63a9b1): NaN/Inf compare false and must not pass
+    for bad in (NaN, Inf, -Inf, 0.0, -2pi * 2000 / 343)
+        @test !accepted(merge(base, (; wavenumber=bad)), base)
+        @test !accepted(base, merge(base, (; wavenumber=bad)))
+    end
+    # discretisation (review of f63a9b1): regular/singular quadrature order and symmetry must match
+    @test !accepted(merge(base, (; regular_quadrature_order=2)), base)
+    @test !accepted(merge(base, (; singular_order=2)), base)
+    @test !accepted(merge(base, (; symmetry_mode=:xz)), base)
+    @test !accepted(Base.structdiff(base, NamedTuple{(:regular_quadrature_order,)}), base)   # missing in truth
+    withenv("HMAT_TRUTH_DISCRETISATION_STUDY" => "1") do      # deliberate quadrature study: own label
+        @test startswith(label(merge(base, (; regular_quadrature_order=2)), base), "Float64 discretisation-study reference")
+        @test label(base, base) == "verified Float64 dump"
+        @test !accepted(merge(base, (; regular_quadrature_order=2, wavenumber=NaN)), base)  # other checks still apply
+    end
+    withenv("HMAT_TRUTH_UNCHECKED" => "1") do
+        @test label(merge(base, (; singular_order=2)), base) == "UNCHECKED reference"
+    end
 end

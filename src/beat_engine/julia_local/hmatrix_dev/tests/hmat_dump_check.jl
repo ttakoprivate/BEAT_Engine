@@ -137,11 +137,12 @@ end
 # CPU (Float64) BEM assembly, Float64 dense matrix and factor. The model fingerprint compares the BEM
 # mesh (topology and tags exactly, coordinates up to Float32 rounding), the non-BEM-operator part of the
 # system (FEM, interface, transducer rows: coil resistance etc.), the interface operator (sizes must
-# match) and the wavenumber (medium, up to Float32 rounding); the right-hand sides are compared per excitation (explicit zero handling).
+# match), the wavenumber (medium, up to Float32 rounding; NaN/Inf rejected), the regular and singular
+# quadrature orders and the symmetry mode (exactly); the right-hand sides are compared per excitation (explicit zero handling).
 function check_truth(truth, d)
     meta(x, key) = hasproperty(x, key) ? string(getproperty(x, key)) : "missing"
     unchecked = get(ENV, "HMAT_TRUTH_UNCHECKED", "0") == "1"
-    problems = String[]
+    problems = String[]; discretisation = String[]
     for (key, want) in ((:model_scalar_type, "Float64"), (:bem_backend, "cpu"), (:assembly_eltype, "ComplexF64"),
                         (:solver_scalar_type, "Float64"), (:solution_eltype, "ComplexF64"))
         meta(truth, key) == want || push!(problems, "truth $key = $(meta(truth, key)) ($want required)")
@@ -152,8 +153,21 @@ function check_truth(truth, d)
     # wavenumber = what the BEM operator is built with: catches a different sound speed (medium) at the same
     # frequency; tolerance allows only the Float32 rounding of the same input (k = 2*pi*f/c)
     kt, kd = Float64(truth.wavenumber), Float64(d.wavenumber)
-    abs(kt - kd) > 8 * eps(Float32) * max(abs(kt), abs(kd)) &&
+    if !(isfinite(kt) && kt > 0 && isfinite(kd) && kd > 0)   # NaN/Inf would pass the tolerance test below
+        push!(problems, "wavenumber $(kt) vs $(kd) (positive finite values required)")
+    elseif abs(kt - kd) > 8 * eps(Float32) * max(abs(kt), abs(kd))
         push!(problems, "wavenumber $(kt) vs $(kd) (different sound speed/medium?)")
+    end
+    # discretisation: the independent operator is built with the checked dump's quadrature orders and
+    # symmetry, so a reference with other settings is a different discrete problem (a deliberate
+    # quadrature study must be labelled as such: HMAT_TRUTH_DISCRETISATION_STUDY=1)
+    study = get(ENV, "HMAT_TRUTH_DISCRETISATION_STUDY", "0") == "1"
+    for key in (:regular_quadrature_order, :singular_order, :symmetry_mode)
+        mt_, md_ = meta(truth, key), meta(d, key)
+        (mt_ == md_ && mt_ != "missing") && continue
+        msg = "$key $(mt_) vs $(md_)"
+        study ? push!(discretisation, msg) : push!(problems, msg * " (different discretisation; HMAT_TRUTH_DISCRETISATION_STUDY=1 for a quadrature comparison)")
+    end
     reldiff(a, b) = (na = max(norm(a), norm(b)); iszero(na) ? 0.0 : norm(a - b) / na)
     # geometry: same BEM topology and tags exactly; coordinates equal up to Float32 rounding of the same input
     mt, md = truth.bem_mesh, d.bem_mesh
@@ -189,7 +203,12 @@ function check_truth(truth, d)
                            " (set HMAT_TRUTH_UNCHECKED=1 to compare anyway)")
         println("   WARNING (HMAT_TRUTH_UNCHECKED=1): ", join(problems, "; "))
     end
-    return unchecked && !isempty(problems) ? "UNCHECKED reference" : "verified Float64 dump"
+    unchecked && !isempty(problems) && return "UNCHECKED reference"
+    if !isempty(discretisation)
+        println("   DISCRETISATION STUDY (HMAT_TRUTH_DISCRETISATION_STUDY=1): ", join(discretisation, "; "))
+        return "Float64 discretisation-study reference (" * join(discretisation, "; ") * ")"
+    end
+    return "verified Float64 dump"
 end
 
 if haskey(ENV, "HMAT_TRUTH_DIR")
