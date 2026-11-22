@@ -409,9 +409,18 @@ end
         c = 2.0^-25
         A3 = ComplexF64[1 a 0; 1 (a + 2.0^-34) 0; 0 0 c]
         b3 = reshape((1 + im) .* [1, 1 + eps(), c * (1 + 2.0^-27)], 3, 1)
-        for factorization in (SD.SplitRefinedLU(split_of(A3)), SD.RefinedDenseLU(copy(A3)))
-            factorization \ b3
-            @test_broken !factorization.estimate_direction_check[1]
+        # With the componentwise acceptance (issue #6) both solvers take one refinement step here
+        # (the forward error stays at the Float64 level κ eps ≈ 4e-6). The split solver's residual
+        # then happens to fail the direction check; the dense one still passes it with estimate 0.
+        split3 = SD.SplitRefinedLU(split_of(A3)); split3 \ b3
+        @test !split3.estimate_direction_check[1]
+        dense3 = SD.RefinedDenseLU(copy(A3)); dense3 \ b3
+        @test_broken !dense3.estimate_direction_check[1]
+        withenv("BLAB_COUPLED_DENSE_COMPONENTWISE" => "0") do      # the original review case
+            for factorization in (SD.SplitRefinedLU(split_of(A3)), SD.RefinedDenseLU(copy(A3)))
+                factorization \ b3
+                @test_broken !factorization.estimate_direction_check[1]
+            end
         end
     end
     # cost: the estimate adds exactly one matrix product per solve, also on a reused factor
@@ -436,5 +445,96 @@ end
         factorization \ randn(rng, ComplexF64, f.n, 2)
         @test isempty(factorization.estimated_error)
         @test SD.dense_solver_diagnostics((factorization=factorization,))["dense_estimated_relative_error"] === nothing
+    end
+end
+
+@testset "componentwise acceptance: no silent error for badly scaled unknowns (issue #6)" begin
+    split_of(dense) = (n = size(dense, 1); m = SD.SplitDenseMatrix(n, 1:n, 1:n);
+                       for j in 1:n, i in 1:n; m[i, j] = dense[i, j]; end; m)
+    # The criterion itself, on a given candidate (review example): A = diag(1, 2⁻⁶⁰),
+    # b = (1, 2⁻⁶⁰), x = (1, 0). Normwise 0.002762 (accepted), componentwise ω = 1.
+    A = ComplexF64[1 0; 0 2.0^-60]
+    b = reshape(ComplexF64[1, 2.0^-60], 2, 1)
+    x = reshape(ComplexF64[1, 0], 2, 1)
+    r = b - A * x
+    normwise = SD._dense_backward_error_ratios(SD.RefinedDenseLU(copy(A)), r, x)
+    @test normwise[1] ≈ 0.002762 rtol = 1e-3
+    omega = SD._componentwise_backward_errors(r, SD._dense_abs_product(A, x), b)
+    @test omega == [1.0]
+    ratios, _ = SD._acceptance_ratios(normwise, r, SD._dense_abs_product(A, x), b, SD._dense_componentwise_tolerance(2))
+    @test ratios[1] > 1e14
+    # zero row with zero residual contributes 0; a residual over a vanishing denominator is visible (Inf)
+    @test SD._componentwise_backward_errors(zeros(ComplexF64, 2, 1), zeros(2, 1), zeros(ComplexF64, 2, 1)) == [0.0]
+    @test SD._componentwise_backward_errors(reshape(ComplexF64[0, 1e-300], 2, 1), zeros(2, 1), zeros(ComplexF64, 2, 1)) == [Inf]
+    @test SD._componentwise_backward_errors(reshape(ComplexF64[0, NaN], 2, 1), ones(2, 1), zeros(ComplexF64, 2, 1))[1] |> isnan
+
+    # |A||x| from the split residual pass equals the dense one up to |hi| + |Δ| ≥ |hi + Δ|
+    rng = MersenneTwister(31)
+    f = split_fixture(rng, 160, 12)
+    split = split_build(f)
+    split[1, first(setdiff(1:f.m, f.gamma_columns))] = 0.1              # one stray entry
+    dense = Matrix(split)
+    xs = randn(rng, ComplexF64, f.n, 3)
+    absolute = Matrix{Float64}(undef, f.n, 3)
+    y = zeros(ComplexF64, f.n, 3)
+    SD._split_mul!(y, split.hi, split, xs, one(ComplexF64), zero(ComplexF64); absolute)
+    reference = abs.(dense) * abs.(xs)
+    @test all(reference .* (1 - 1e-13) .<= absolute .<= reference .* (1 + 4 * eps(Float32)))
+    @test y ≈ dense * xs rtol = 1e-13
+
+    # Badly scaled unknowns (half the columns scaled by 1e-10, so those components are ~1e10 and
+    # dominate ‖x‖∞): the normwise test accepts the plain Float32 solve with a 4e-4 error.
+    function scaled_system(seed)
+        rng = MersenneTwister(seed)
+        n, k = 60, 30
+        u, _ = qr(randn(rng, ComplexF64, n, n)); v, _ = qr(randn(rng, ComplexF64, n, n))
+        B = Matrix(u) * Diagonal(exp10.(range(0, -4; length=n))) * Matrix(v)'
+        d = ones(n); d[1:k] .= 1e-10
+        exact = randn(rng, ComplexF64, n, 2); exact[1:k, :] ./= 1e-10
+        A = B * Diagonal(d)
+        return A, A * exact
+    end
+    relative(x, exact) = maximum(abs.(x .- exact) ./ abs.(exact))
+    for seed in (2, 3)
+        A, rhs = scaled_system(seed)
+        reference = lu(A) \ rhs                                         # Float64 dense reference
+        exact = setprecision(BigFloat, 160) do
+            ComplexF64.(Complex{BigFloat}.(A) \ Complex{BigFloat}.(rhs))
+        end
+        for build in (() -> SD.SplitRefinedLU(split_of(A)), () -> SD.RefinedDenseLU(copy(A)))
+            legacy = withenv(build, "BLAB_COUPLED_DENSE_COMPONENTWISE" => "0")
+            legacy_x = legacy \ rhs
+            @test legacy.iterations == 0                                # accepted unrefined ...
+            @test relative(legacy_x, exact) > 1e-5                      # ... with a large error
+            @test isnan(legacy.componentwise_tolerance)
+            factorization = build()
+            solution = factorization \ rhs
+            @test isnothing(factorization.fallback) && factorization.iterations >= 2
+            @test factorization.componentwise_backward_error <= factorization.componentwise_tolerance
+            @test factorization.backward_error <= 1
+            @test relative(solution, exact) < 1e-10                     # max complex relative error per component
+            @test relative(solution, exact) <= 10 * relative(reference, exact) + 1e-12
+            diagnostics = SD.dense_solver_diagnostics((factorization=factorization,))
+            @test diagnostics["dense_refinement_componentwise_backward_error"] == factorization.componentwise_backward_error
+            @test diagnostics["dense_refinement_componentwise_tolerance"] == 2 * (size(A, 1) + 1) * eps(Float64)
+            parsed = JSON.parse(JSON.json(diagnostics))
+            @test parsed["dense_refinement_componentwise_tolerance"] isa Real
+            off = SD.dense_solver_diagnostics((factorization=legacy,))
+            @test off["dense_refinement_componentwise_tolerance"] === nothing
+        end
+    end
+    # GMRES-IR accepts only componentwise-converged columns too
+    rng = MersenneTwister(13)
+    g = split_fixture(rng, 200, 10; condition=1e9)
+    factorization = SD.SplitRefinedLU(split_build(g))
+    factorization \ randn(rng, ComplexF64, g.n, 2)
+    @test isnothing(factorization.fallback) && factorization.gmres_iterations > 0
+    @test factorization.componentwise_backward_error <= factorization.componentwise_tolerance
+    # tolerance override and validation
+    withenv("BLAB_COUPLED_DENSE_COMPONENTWISE_TOL" => "1e-9") do
+        @test SD._dense_componentwise_tolerance(10) == 1e-9
+    end
+    withenv("BLAB_COUPLED_DENSE_COMPONENTWISE_TOL" => "-1") do
+        @test_throws ErrorException SD._dense_componentwise_tolerance(10)
     end
 end
