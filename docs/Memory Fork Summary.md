@@ -94,15 +94,21 @@ coexist on the device while the system is built.
 `dense_refinement_backward_error`, `dense_gmres_ir_iterations`,
 `dense_split_border_columns/rows`, `dense_split_stray_entries` (expected 0) and `dense_spill`.
 
-Error estimate: `dense_estimated_relative_error` (worst excitation) and
-`dense_estimated_relative_error_per_excitation`. After an accepted solve one more correction
-d = LU⁻¹ r is formed from the final Float64 residual (one triangular solve with the existing
-factor, no extra matrix product); the estimate is max|d| / max|x| per excitation. It estimates the
-solver's error for the assembled system, not discretization error, and does not change the
-solution. Against a 160-bit reference on conditioned test systems (κ 1e3 to 1e8) it is within a
-factor 4 of the true error on the refined, GMRES-IR and Float64-fallback paths (unit test in
-`split_dense_tests.jl`). `BLAB_DENSE_ERROR_ESTIMATE=0` skips it. Mapping d to per-output dB
-(polars, velocity, current) is the next step.
+Error estimate: `dense_estimated_relative_error` (worst excitation),
+`dense_estimated_relative_error_per_excitation`, `dense_estimate_reliable` and
+`dense_estimate_reliable_per_excitation`. After an accepted solve, from the final Float64 residual
+r: d = M⁻¹ r and w = M⁻¹ (A d) with the solver's own factor M; ρ = |w − d| / |d| measures how far
+M⁻¹A is from the identity in the direction of d. The estimate is |d| / (1 − ρ) / |x| per excitation
+when ρ ≤ 1/2; otherwise the excitation is marked unreliable (the factor is not a good inverse there,
+e.g. a Float32 pivot shifted by rounding) and |d| / |x| is only an indication. Residual columns are
+scaled by a power of two before the Float32 solve. Cost: one matrix product and two solves with the
+existing factor per solve. Scope: the solver's error for the assembled system, not discretization
+error and not Float32 assembly error. The solution is not changed. Against a 160-bit reference
+(κ 1e3 to 1e8, `split_dense_tests.jl`): reliable excitations are within a factor 10 of the true
+error (observed ≤ 2.5); at κ ≤ 1e6 all are reliable; the two shifted-pivot cases from the review
+(32x and 2048x underestimation) are marked unreliable. After a `SplitGMRES` fallback the LU's
+estimate is reported. `BLAB_DENSE_ERROR_ESTIMATE=0` skips it. Mapping d to per-output dB (polars,
+velocity, current) is the next step.
 
 ## Not covered yet
 - Dense LU through Apple Accelerate (AMX/SME) instead of OpenBLAS; benchmark pending.

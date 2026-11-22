@@ -236,7 +236,11 @@ end
         solution = (@test_logs (:warn,) match_mode=:any solver \ rhs)
         @test solver.fallback isa SD.SplitRefinedLU
         @test norm(solution - reference) / norm(reference) < 1e-12
-        @test SD.dense_solver_diagnostics((factorization=solver,))["dense_solver"] == "gmres_fallback_lu"
+        diagnostics = SD.dense_solver_diagnostics((factorization=solver,))
+        @test diagnostics["dense_solver"] == "gmres_fallback_lu"
+        # the fallback LU's error estimate is passed through
+        @test diagnostics["dense_estimated_relative_error_per_excitation"] == solver.fallback.estimated_error
+        @test !isempty(solver.fallback.estimated_error) && diagnostics["dense_estimate_reliable"] === true
     end
 end
 
@@ -307,6 +311,10 @@ end
 end
 
 @testset "a-posteriori error estimate tracks the true solver error" begin
+    relative_error(x, exact) = [Float64(maximum(abs, x[:, j] - exact[:, j]) / maximum(abs, exact[:, j])) for j in axes(x, 2)]
+    # every row and column on the Float64 border: the split matrix holds A exactly
+    split_of(dense) = (n = size(dense, 1); m = SD.SplitDenseMatrix(n, 1:n, 1:n);
+                       for j in 1:n, i in 1:n; m[i, j] = dense[i, j]; end; m)
     setprecision(BigFloat, 160) do
         for condition in (1e3, 1e6, 1e8)
             rng = MersenneTwister(21)
@@ -316,17 +324,61 @@ end
             exact = Complex{BigFloat}.(dense) \ Complex{BigFloat}.(rhs)
             for factorization in (SD.SplitRefinedLU(split_build(f)), SD.RefinedDenseLU(copy(dense)))
                 solution = factorization \ rhs
-                truth = [Float64(maximum(abs, solution[:, j] - exact[:, j]) / maximum(abs, exact[:, j])) for j in 1:3]
+                truth = relative_error(solution, exact)
                 estimate = factorization.estimated_error
+                reliable = factorization.estimate_reliable
                 @test length(estimate) == 3 && all(isfinite, estimate)
-                # within a factor 10 of the true error on every path (refined, GMRES-IR, Float64 fallback)
-                @test all(0.1 .<= estimate ./ max.(truth, floatmin()) .<= 10)
+                # κ eps(Float32) < 1: the Float32 factor is a good inverse and every column is reliable
+                condition <= 1e6 && @test all(reliable)
+                # a column marked reliable is within a factor 10 of the true error on every path
+                # (refined, GMRES-IR, Float64 fallback); at κ = 1e8 columns may be marked unreliable
+                @test all(.!reliable .| (0.1 .<= estimate ./ max.(truth, floatmin()) .<= 10))
                 diagnostics = SD.dense_solver_diagnostics((factorization=factorization,))
                 @test diagnostics["dense_estimated_relative_error"] == maximum(estimate)
                 @test diagnostics["dense_estimated_relative_error_per_excitation"] == estimate
+                @test diagnostics["dense_estimate_reliable"] === all(reliable)
+            end
+        end
+        # review case 1: a tiny excitation must not drop the estimate to zero (residual scaled before Float32)
+        A = ComplexF64[1 0; (1 + eps()) 2.0^-25]
+        s = 2.0^-99
+        B = (1 + im) .* [1.0 s; 1.0 s]
+        for factorization in (SD.SplitRefinedLU(split_of(A)), SD.RefinedDenseLU(copy(A)))
+            factorization \ B
+            e = factorization.estimated_error
+            @test e[2] > 0 && isapprox(e[2], e[1]; rtol=1e-6)
+        end
+        # review case 2: a Float32 pivot shifted by rounding makes M⁻¹A far from I; the estimate
+        # underestimates by 32x / 2048x here and must be marked unreliable
+        for tail in (2.0^-28, 2.0^-34)
+            a = 1 + 2.0^-24
+            A2 = ComplexF64[1 a; 1 (a + tail)]
+            b = reshape((1 + im) .* [1, 1 + eps()], 2, 1)
+            exact = Complex{BigFloat}.(A2) \ Complex{BigFloat}.(b)
+            for factorization in (SD.SplitRefinedLU(split_of(A2)), SD.RefinedDenseLU(copy(A2)))
+                x = factorization \ b
+                truth = relative_error(x, exact)[1]
+                ok = 0.1 <= factorization.estimated_error[1] / max(truth, floatmin()) <= 10
+                @test ok || !factorization.estimate_reliable[1]
+                @test !factorization.estimate_reliable[1]
             end
         end
     end
+    # cost: the estimate adds exactly one matrix product per solve, also on a reused factor
+    rng = MersenneTwister(13)
+    f = split_fixture(rng, 200, 8; condition=1e6)
+    rhs = randn(rng, ComplexF64, f.n, 2)
+    products(enabled) = withenv("BLAB_DENSE_ERROR_ESTIMATE" => enabled ? "1" : "0") do
+        factorization = SD.SplitRefinedLU(split_build(f))
+        counts = Int[]
+        for b in (rhs, zero(rhs))
+            before = parentmodule(SD.SplitRefinedLU).SPLIT_MUL_CALLS[]
+            factorization \ b
+            push!(counts, parentmodule(SD.SplitRefinedLU).SPLIT_MUL_CALLS[] - before)
+        end
+        counts
+    end
+    @test products(true) == products(false) .+ 1
     withenv("BLAB_DENSE_ERROR_ESTIMATE" => "0") do
         rng = MersenneTwister(1)
         f = split_fixture(rng, 60, 4)
