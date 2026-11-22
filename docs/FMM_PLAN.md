@@ -461,9 +461,11 @@ same configuration vs Float64 (max |err| / max |ref|, dominated by the flux unkn
 In the default split path the estimate is 1e-9 .. 5e-9 (10 and 20 kHz), while the result differs from the full
 Float64 run by ~3e-5 .. 7e-5: that remainder is Float32 assembly / Float32 storage of the dense block, which the
 solver estimate does not see by design. Follow-ups: (a) let the refinement continue while the estimate is above
-a tolerance (a numerical change: separate PR); (b) an assembly indicator. Row sampling was tried on the dump
-(64 exact Float64 BEM rows, residual norm extrapolated, random-direction amplification): it underestimated the
-residual by ~300x and the error by ~30x, so it is not usable. The full Float64 residual against the H operator
+a tolerance (a numerical change: separate PR, issue #6); (b) an assembly indicator (issue #4). A naive row
+sampling was tried on the dump (the first 64 BEM rows, A and C only, no right-hand side, residual norm
+extrapolated, error propagated along a random direction): it underestimated the residual by ~300x and the error
+by ~30x. Issue #4 proposes the sound version (random full rows with known inclusion probabilities, all blocks
+including the right-hand side, adjoint solve for outputs); not tested yet. The full Float64 residual against the H operator
 plus one correction (section below) does work; it costs one H build per checked frequency.
 
 ## Review of 3190c88 (ChatGPT agent, 2026-11-21) and fixes (branch claude/hmatrix-review-fixes)
