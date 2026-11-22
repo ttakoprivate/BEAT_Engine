@@ -398,6 +398,7 @@ function _dense_solver_diagnostics(system)
             "dense_refinement_fallback_reason" => factorization.fallback_reason,
             # after a fallback the LU's estimate is the relevant one; without it GMRES gives none
             (isnothing(factorization.fallback) ? () : _estimate_diagnostics(factorization.fallback))...,
+            (isnothing(factorization.fallback) ? () : _componentwise_diagnostics(factorization.fallback))...,
         )
     end
     if factorization isa SplitRefinedLU

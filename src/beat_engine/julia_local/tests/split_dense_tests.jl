@@ -244,6 +244,10 @@ end
         # the fallback LU's error estimate is passed through
         @test diagnostics["dense_estimated_relative_error_per_excitation"] == solver.fallback.estimated_error
         @test !isempty(solver.fallback.estimated_error) && diagnostics["dense_estimate_direction_check_passed"] === true
+        # and its componentwise acceptance (Codex review on PR #15)
+        @test diagnostics["dense_refinement_componentwise_tolerance"] == 2 * (f.n + 1) * eps(Float64)
+        @test diagnostics["dense_refinement_componentwise_backward_error"] == solver.fallback.componentwise_backward_error
+        @test diagnostics["dense_refinement_componentwise_backward_error"] <= diagnostics["dense_refinement_componentwise_tolerance"]
     end
 end
 
