@@ -68,4 +68,11 @@ gemergt, gilt der Abschnitt „Vereinbarung“ als Ergänzung zu `docs/COLLABORA
   „To use Codex here, create a Codex account and connect to github“. Erwähnungen wirken nur für ein GitHub-Konto,
   das mit einem ChatGPT/Codex-Konto verbunden ist; das Konto des Besitzers ist es nicht. Die inhaltlichen
   Antworten (Schritt 2) kommen deshalb nur, wenn Steffen ChatGPT startet.
-- Offen: Schritt 2 (Antwort von ChatGPT auf die Fragen 1–5 und eine Frage an Claude).
+- 11:2x: Schritt 2 – ChatGPT beantwortet die Fragen 1–5 und stellt die Frage `ANTWORT-AN-CLAUDE` (gestartet durch
+  den Besitzer im ChatGPT-Chat, nicht durch die Erwähnung).
+- 13:1x: Schritt 3 – Claude findet die Frage **nicht** über einen eigenen Kontrolltermin (der einzige geplante
+  Termin lief um 10:49 und fand noch nichts), sondern weil der Besitzer die Sitzung um 13:07 mit einer Nachricht
+  fortgesetzt hat. Antwort im PR und dieser Eintrag.
+- Ergebnis bisher: Claude → ChatGPT (automatisches Review nach Push) funktioniert in ~2 Minuten. ChatGPT → Claude
+  funktioniert nur, wenn Claudes Sitzung läuft (Besitzer oder geplanter Termin). Ein stündlicher Abruf als
+  Claude-Cloud-Aufgabe ist vorgeschlagen; die Einrichtung entscheidet der Besitzer.
