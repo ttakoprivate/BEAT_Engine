@@ -21,57 +21,60 @@
     22
   ],
   "lease": {
-    "holder": "work19-mws5cnq3",
-    "acquired_at": "2026-11-22T18:04:46.491Z",
-    "expires_at": "2026-11-22T19:34:46.491Z",
+    "holder": null,
+    "acquired_at": null,
+    "expires_at": null,
     "fencing_token": 3
   },
   "last_completed_run": {
-    "id": "work-20261122T165518-mws2y6wm-mf3yu34",
-    "started_at": "2026-11-22T16:57:32.278Z",
-    "completed_at": "2026-11-22T17:04:19.591Z",
-    "status": "review_handoff_published",
-    "source_commit": "a62cae98841c95d1981f8768423c39db9637daf1",
-    "source_status": "clean",
-    "actions": [
-      {
-        "issue_or_pr": 14,
-        "id": 7082522821,
-        "url": "https://github.com/ttakoprivate/BEAT_Engine/pull/14#issuecomment-7082522821"
-      },
-      {
-        "issue_or_pr": 17,
-        "id": 7082524021,
-        "url": "https://github.com/ttakoprivate/BEAT_Engine/pull/17#issuecomment-7082524021"
-      },
-      {
-        "issue_or_pr": 16,
-        "id": 7082537156,
-        "url": "https://github.com/ttakoprivate/BEAT_Engine/issues/16#issuecomment-7082537156"
-      }
-    ],
+    "id": "work19-mws5cnq3",
+    "started_at": "2026-11-22T18:04:46.491Z",
+    "completed_at": "2026-11-22T18:13:41.661Z",
+    "status": "driver_reference_fix_verified",
     "checked_heads": {
-      "3": "f9485da85237bc06be3f77fa34c1345d8285bf18",
+      "3": "10b86e208872cb795dcb7f972eec2d6a12ed09ec",
       "9": "3d639cef853f6c60caa36fda4a8b39f28baec3f7",
       "13": "a15bfb13997eca5b2eee3b2b7eda66932297230b",
       "14": "e9af918a436f93afdb630f06af539d08f45f46c8",
       "15": "a82f907dd17688baae9851690f04aa419745b04e",
       "17": "ab90c26aebfdc79fd85bc0b777413a17e558f004"
     },
-    "triage": {
-      "9": "Claude has acknowledged outstanding roadmap/owner-threshold decisions; no new commit to re-review.",
-      "10": "Existing PR14 updated; explicit CPU review requested, h343 hardware qualification pending.",
-      "11": "Existing PR17 submitted; explicit test review requested, Claude-owned bem_motion_flux identity correction pending in PR3.",
-      "12": "Awaiting the owner's VACS example and format decisions; no duplicate question posted.",
-      "13_and_15": "Latest current heads already carry ChatGPT approvals; no duplicate review."
-    },
-    "checks": {
-      "git_commands_exit_code": 0,
-      "review_requests_read_back": true,
+    "results": {
+      "checker_tests": {
+        "passed": 45,
+        "exit_code": 0
+      },
+      "independent_reference": {
+        "passed": 378,
+        "exit_code": 0,
+        "unchanged_test_commit": "ab90c26aebfdc79fd85bc0b777413a17e558f004"
+      },
       "source_changes": false,
-      "numerical_tests": "Not rerun: no new code change or new numerical concern in this handoff round."
+      "pr17_body_updated": true
     },
-    "pending": "Await Claude's independent reviews and confirmation that existing polling includes chatgpt PRs with explicit draft-review requests."
+    "actions": [
+      {
+        "pr": 3,
+        "id": 7083427714,
+        "url": "https://github.com/ttakoprivate/BEAT_Engine/pull/3#issuecomment-7083427714"
+      },
+      {
+        "pr": 14,
+        "id": 7083429255,
+        "url": "https://github.com/ttakoprivate/BEAT_Engine/pull/14#issuecomment-7083429255"
+      },
+      {
+        "pr": 17,
+        "id": 7083426199,
+        "url": "https://github.com/ttakoprivate/BEAT_Engine/pull/17#issuecomment-7083426199"
+      }
+    ],
+    "pending": [
+      "Claude full independent reviews of PR14 and PR17 deferred to owner session; bounded first partial review requested in PR14.",
+      "PR3 fix must be merged by owner before target hmatrix-dev gains it.",
+      "VACS example/format pending in issue12; h343 and Metal/CUDA qualification remain separate."
+    ],
+    "limits": "CPU fixture and binary-dump regression; original two complete solver-hook dumps and conjugated CLI branch not separately rerun. No hardware qualification or general accuracy guarantee."
   },
   "note": "Coordination state only. Read project code from the assigned source branch. Acquire and update this lease through expected-SHA branch updates; do not merge this branch."
 }
