@@ -36,11 +36,18 @@ end
 """ACA with partial pivoting. row(i) -> entries of row I[i] over J, col(j) -> column J[j] over I."""
 function aca(row, col, m::Int, n::Int, tol::Float64; maxrank::Int=min(m, n))
     U = Vector{Vector{ComplexF64}}(); V = Vector{Vector{ComplexF64}}()
-    usedr = falses(m); i = 1; norm2 = 0.0; visits = 0
+    usedr = falses(m); i = 1; norm2 = 0.0; visits = 0; scale = 0.0
     # only accepted rank-1 terms count against maxrank; an empty pivot row just moves on
     while length(U) < maxrank && visits < m
         visits += 1
         r = Vector{ComplexF64}(row(i))
+        # work on entries scaled by a power of two set from the first non-zero row, so the squared norms
+        # neither under- nor overflow for very small or large blocks; U is unscaled on return
+        if iszero(scale)
+            mx = maximum(abs, r; init=0.0)
+            (iszero(mx) || !isfinite(mx)) || (scale = exp2(exponent(mx)))
+        end
+        iszero(scale) || (r ./= scale)
         for t in eachindex(U); r .-= U[t][i] .* conj.(V[t]); end
         usedr[i] = true
         j = argmax(abs.(r)); piv = r[j]
@@ -48,7 +55,7 @@ function aca(row, col, m::Int, n::Int, tol::Float64; maxrank::Int=min(m, n))
             free = findall(!, usedr); isempty(free) && break
             i = free[1]; continue
         end
-        c = Vector{ComplexF64}(col(j))
+        c = Vector{ComplexF64}(col(j)) ./ scale
         for t in eachindex(U); c .-= conj(V[t][j]) .* U[t]; end
         v = conj.(r ./ piv)
         # update ||S||^2 incrementally
@@ -63,7 +70,7 @@ function aca(row, col, m::Int, n::Int, tol::Float64; maxrank::Int=min(m, n))
         a[i] < 0 && break
     end
     k = length(U)
-    Um = k == 0 ? zeros(ComplexF64, m, 0) : reduce(hcat, U)
+    Um = k == 0 ? zeros(ComplexF64, m, 0) : reduce(hcat, U) .* scale
     Vm = k == 0 ? zeros(ComplexF64, n, 0) : reduce(hcat, V)
     return Um, Vm
 end

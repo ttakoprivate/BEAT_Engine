@@ -68,7 +68,7 @@ index 34ab05e..ceaa0dc 100644
 +            identity_p1_dp0=SparseMatrixCSC{ComplexF64,Int}(condensed_cache.base.identity_p1_dp0),
 +            bem_lhs_rows=ComplexF64.(coupled[bem_range[1:nr], bem_range]),
 +            bem_iface_rows=ComplexF64.(coupled[bem_range[1:nr], flux_range]),
-+            assembly_eltype=string(eltype(coupled)),
++            assembly_eltype=string(eltype(coupled)), model_scalar_type=string(T), bem_backend=string(bem_backend),
 +        )
 +    end
      coupled_factorization_started = time_ns()

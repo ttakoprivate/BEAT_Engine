@@ -8,7 +8,7 @@ include(joinpath(HMAT_DIR, "hmat_core.jl"))
 aca_of(A, tol; kw...) = aca(i -> A[i, :], j -> A[:, j], size(A)..., tol; kw...)
 
 @testset "ACA: relative stop independent of the block scale" begin
-    for s in (1.0, 1e-16, 1e-150)
+    for s in (1.0, 1e-16, 1e-150, 1e-170, 1e160)
         A = s * Matrix(Diagonal(ComplexF64[1 + im, 1 - im]))
         U, V = aca_of(A, 1e-5)
         x = ones(ComplexF64, 2)
@@ -43,7 +43,7 @@ if Base.find_package("KernelAbstractions") !== nothing && Base.find_package("Ada
          isempty(s.V) ? zeros(ComplexF64, size(A, 2), 0) : reduce(hcat, s.V))
     end
     @testset "batched ACA: relative stop independent of the block scale" begin
-        for s in (1.0, 1e-16)
+        for s in (1.0, 1e-16, 1e-170, 1e160)
             A = s * Matrix(Diagonal(ComplexF64[1 + im, 1 - im]))
             U, V = batched_of(A, 1e-5)
             @test norm(U * (V' * ones(2)) - A * ones(2)) <= 1e-12 * norm(A * ones(2))

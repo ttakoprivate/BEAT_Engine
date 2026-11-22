@@ -133,27 +133,50 @@ end
 # Scope: only the BEM operator rows (A and C) are re-evaluated independently (H operator, Float64 near
 # entries). `rest` (FEM, interface, transducer rows) and the right-hand side come from the dump being
 # checked, so errors in those blocks are NOT seen by this estimate.
+# A verified reference must be a full Float64 run of the same physical model: Float64 model data,
+# CPU (Float64) BEM assembly, Float64 dense matrix and factor. The model fingerprint compares the
+# non-BEM-operator part of the system (FEM, interface, transducer rows: coil resistance etc.) and the
+# interface operators; the right-hand sides are compared per excitation (explicit zero handling).
 function check_truth(truth, d)
     meta(x, key) = hasproperty(x, key) ? string(getproperty(x, key)) : "missing"
     unchecked = get(ENV, "HMAT_TRUTH_UNCHECKED", "0") == "1"
     problems = String[]
-    meta(truth, :solver_scalar_type) == "Float64" || push!(problems, "truth solver_scalar_type = $(meta(truth, :solver_scalar_type)) (Float64 required)")
-    meta(truth, :solution_eltype) == "ComplexF64" || push!(problems, "truth solution_eltype = $(meta(truth, :solution_eltype))")
+    for (key, want) in ((:model_scalar_type, "Float64"), (:bem_backend, "cpu"), (:assembly_eltype, "ComplexF64"),
+                        (:solver_scalar_type, "Float64"), (:solution_eltype, "ComplexF64"))
+        meta(truth, key) == want || push!(problems, "truth $key = $(meta(truth, key)) ($want required)")
+    end
+    startswith(meta(truth, :dense_solver), "lu_float64") ||
+        push!(problems, "truth dense_solver = $(meta(truth, :dense_solver)) (a Float64 LU required)")
     truth.frequency_hz == d.frequency_hz || push!(problems, "frequency $(truth.frequency_hz) vs $(d.frequency_hz)")
-    size(truth.rhs) == size(d.rhs) || push!(problems, "rhs size $(size(truth.rhs)) vs $(size(d.rhs))")
-    size(truth.rhs) == size(d.rhs) && (mis = norm(truth.rhs - d.rhs) / norm(truth.rhs)) > 1e-3 &&
-        push!(problems, "right-hand sides differ by $(mis) (different model or excitation order?)")
+    reldiff(a, b) = (na = max(norm(a), norm(b)); iszero(na) ? 0.0 : norm(a - b) / na)
+    if size(truth.rest) != size(d.rest)
+        push!(problems, "system size $(size(truth.rest)) vs $(size(d.rest))")
+    else
+        (m = reldiff(truth.rest, d.rest)) > 1e-4 && push!(problems, "model fingerprint: non-BEM system part differs by $(m) (different transducer/FEM data?)")
+        size(truth.bem_flux) == size(d.bem_flux) && (m = reldiff(truth.bem_flux, d.bem_flux)) > 1e-4 &&
+            push!(problems, "interface operator differs by $(m)")
+    end
+    if size(truth.rhs) != size(d.rhs)
+        push!(problems, "rhs size $(size(truth.rhs)) vs $(size(d.rhs))")
+    else
+        for c in axes(d.rhs, 2)
+            bt = truth.rhs[:, c]; bd = d.rhs[:, c]
+            iszero(bt) != iszero(bd) && (push!(problems, "excitation $c: zero in one dump only"); continue)
+            (m = reldiff(bt, bd)) > 1e-4 && push!(problems, "excitation $c: right-hand side differs by $(m) (order or model?)")
+        end
+    end
     if !isempty(problems)
         unchecked || error("HMAT_TRUTH_DIR is not a usable Float64 reference: " * join(problems, "; ") *
                            " (set HMAT_TRUTH_UNCHECKED=1 to compare anyway)")
         println("   WARNING (HMAT_TRUTH_UNCHECKED=1): ", join(problems, "; "))
     end
-    return unchecked && !isempty(problems) ? "UNCHECKED reference" : "Float64 dump"
+    return unchecked && !isempty(problems) ? "UNCHECKED reference" : "verified Float64 dump"
 end
 
 if haskey(ENV, "HMAT_TRUTH_DIR")
     truth = hmat_load(ENV["HMAT_TRUTH_DIR"])
-    ec < ep && (truth = merge(truth, (rhs=conj.(truth.rhs), dense_solution=conj.(truth.dense_solution))))  # as d above
+    ec < ep && (truth = merge(truth, (rhs=conj.(truth.rhs), dense_solution=conj.(truth.dense_solution),
+                                      rest=conj.(truth.rest), bem_flux=conj.(truth.bem_flux))))  # as d above
     label = check_truth(truth, d)
     tr = truth.dense_solution
     nexc = min(size(d.rhs, 2), parse(Int, get(ENV, "HMAT_EST_NEXC", "6")))
