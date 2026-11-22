@@ -39,11 +39,15 @@ gemergt, gilt der Abschnitt „Vereinbarung“ als Ergänzung zu `docs/COLLABORA
 - **Kennzeichnung.** Jeder Beitrag beginnt mit `[Claude]` bzw. `[ChatGPT]`, weil beide unter Personenkonten
   schreiben.
 - **Sprache.** Deutsch für alle Beiträge. Code, Bezeichner und Commit-Nachrichten bleiben Englisch.
-- **Branches.** `claude/...` bzw. `chatgpt/...`. Auf `memory-fork` und `main` nur per PR; gemergt wird nur
-  vom Besitzer (Claude mergt ausschließlich nach ausdrücklichem „mehet“ des Besitzers).
+- **Branches.** `claude/...` bzw. `chatgpt/...`. Änderungen an `memory-fork` nur per PR. `main` bleibt
+  unveränderter Upstream-Spiegel, ohne Commits und ohne PRs (wie in `docs/COLLABORATION.md`).
+- **Merge.** Der Besitzer entscheidet. Offene Frage an den Besitzer: Bisher hat Claude PR #1 und #5 nach seinem
+  ausdrücklichen „mehet“ selbst gemergt, was `docs/COLLABORATION.md` (kein Agent merged) widerspricht. Der
+  Besitzer legt fest, ob er künftig selbst mergt oder diese Ausnahme in die Regeln aufgenommen wird.
 - **Zuständigkeit.** Jeder korrigiert nur seinen eigenen Code. Fehler im Code des anderen werden als Review oder
   Issue gemeldet, mit reproduzierbarem Beispiel.
-- **Review-Ergebnis.** „Approve“ oder „Changes requested“ mit nummerierten Punkten. Der Autor antwortet Punkt
+- **Review-Ergebnis.** „Approve“, „Changes requested“ oder „Comment“ (nicht blockierende Hinweise), wie in
+  `docs/COLLABORATION.md`, mit nummerierten Punkten. Der Autor antwortet Punkt
   für Punkt und nennt den Commit der Korrektur.
 - **Ideen.** Issues mit Label `idea`; der Zuständige antwortet beim nächsten Durchgang.
 - **Erreichbarkeit von Claude.** Claude prüft während laufender Arbeit regelmäßig (Ziel: etwa stündlich, solange
@@ -52,4 +56,9 @@ gemergt, gilt der Abschnitt „Vereinbarung“ als Ergänzung zu `docs/COLLABORA
 
 ## Protokoll
 
-- 22.11.2026: PR eröffnet von Claude (Schritt 1).
+- 22.11.2026, 10:28 (MEZ): PR eröffnet von Claude (Schritt 1).
+- 10:28–10:30: automatisches Codex-Review (`chatgpt-codex-connector[bot]`) nach ~2,5 Minuten, Auslöser
+  „PR opened“. Es prüft den Inhalt wie Code (3 berechtigte Hinweise, hier eingearbeitet), beantwortet aber die
+  Fragen nicht: Der automatische Review-Bot ist ein Prüfer, kein Gesprächspartner. Schritt 2 ist damit offen.
+- 10:5x: Claude arbeitet die 3 Hinweise ein (dieser Push = Test „zweites automatisches Review“) und testet,
+  ob eine Erwähnung des Codex-Bots mit einer Frage eine inhaltliche Antwort auslöst.
