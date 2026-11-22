@@ -217,7 +217,7 @@ mutable struct RefinedDenseLU
     fallback_reason::Union{Nothing,String}
     backward_error::Float64
     estimated_error::Vector{Float64}   # per column of the last solve (see _dense_error_estimate)
-    estimate_reliable::Vector{Bool}
+    estimate_direction_check::Vector{Bool}
 end
 
 function RefinedDenseLU(matrix::Matrix{ComplexF64})
@@ -272,11 +272,12 @@ function Base.:\(factorization::RefinedDenseLU, rhs::AbstractVecOrMat)
         apply = isnothing(factorization.fallback) ? (r -> ComplexF64.(factorization.factor \ ComplexF32.(r))) :
                                                     (r -> factorization.fallback \ r)
         multiply = y -> factorization.matrix * y
-        factorization.estimated_error, factorization.estimate_reliable =
+        factorization.estimated_error, factorization.estimate_direction_check =
             _dense_error_estimate(apply, multiply, solution isa AbstractVector ? reshape(solution, :, 1) : solution,
-                                  residual isa AbstractVector ? reshape(residual, :, 1) : residual)
+                                  residual isa AbstractVector ? reshape(residual, :, 1) : residual,
+                                  target isa AbstractVector ? reshape(target, :, 1) : target)
     else
-        factorization.estimated_error, factorization.estimate_reliable = Float64[], Bool[]
+        factorization.estimated_error, factorization.estimate_direction_check = Float64[], Bool[]
     end
     return solution
 end
@@ -330,9 +331,10 @@ BeatEngineSplitDense.jl), or `lu_float64_fallback` after a refinement fallback),
 `dense_refinement_iterations`, `dense_refinement_fallback_reason` and `dense_refinement_backward_error`
 (the last solve's worst column, in units of the Float64 attainable backward error).
 For the refined solvers (and after a `SplitGMRES` fallback) also `dense_estimated_relative_error`
-(worst excitation), `dense_estimated_relative_error_per_excitation`, `dense_estimate_reliable` and
-`dense_estimate_reliable_per_excitation`: an a-posteriori estimate of the solver's relative error
-for the assembled system (not discretization or assembly error), see `_dense_error_estimate`.
+(worst excitation), `dense_estimated_relative_error_per_excitation` (`nothing` where not finite),
+`dense_estimate_direction_check_passed` and `dense_estimate_direction_check_passed_per_excitation`:
+an a-posteriori estimate of the solver's relative error for the assembled system (not discretization
+or assembly error) and a heuristic check of it, see `_dense_error_estimate`.
 `BLAB_DENSE_ERROR_ESTIMATE=0` skips it.
 """
 function dense_solver_diagnostics(system)
@@ -341,12 +343,14 @@ function dense_solver_diagnostics(system)
     return diagnostics
 end
 
+# non-finite estimates (NaN) are reported as `nothing` (JSON null); the worst is taken over the finite ones
 function _estimate_diagnostics(factorization)
     estimates = factorization.estimated_error
-    return ("dense_estimated_relative_error" => isempty(estimates) ? nothing : maximum(estimates),
-            "dense_estimated_relative_error_per_excitation" => estimates,
-            "dense_estimate_reliable" => isempty(estimates) ? nothing : all(factorization.estimate_reliable),
-            "dense_estimate_reliable_per_excitation" => factorization.estimate_reliable)
+    finite = filter(isfinite, estimates)
+    return ("dense_estimated_relative_error" => isempty(finite) ? nothing : maximum(finite),
+            "dense_estimated_relative_error_per_excitation" => Union{Nothing,Float64}[isfinite(e) ? e : nothing for e in estimates],
+            "dense_estimate_direction_check_passed" => isempty(estimates) ? nothing : all(factorization.estimate_direction_check),
+            "dense_estimate_direction_check_passed_per_excitation" => factorization.estimate_direction_check)
 end
 
 function _dense_solver_diagnostics(system)

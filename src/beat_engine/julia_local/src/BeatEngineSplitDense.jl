@@ -59,40 +59,49 @@ const SPLIT_REFINEMENT_MAX_ITERATIONS = 10       # as DENSE_REFINEMENT_MAX_ITERA
 # not changed). From the final Float64 residual r:
 #   d = M⁻¹ r                 (M: the factor the solver used; d ≈ x_exact - x when M⁻¹A ≈ I)
 #   w = M⁻¹ (A d),  ρ = |w - d| / |d|      (how far M⁻¹A is from I in the direction of d)
-# Per column the estimate is |d| / (1 - ρ) / |x| when ρ <= 1/2. Otherwise the factor is not a
-# reliable inverse in that direction (for example a Float32 pivot shifted by rounding), the column is
-# marked unreliable and |d| / |x| is reported only as an indication. ρ uses A d, not a second
-# residual, so it is not swamped by rounding noise once r is at the Float64 level. Residual columns
-# are scaled by a power of two before the Float32 solve, so small excitations do not underflow.
+# Per excitation the estimate is |d| / (1 - ρ) / |x| when ρ <= 1/2, else |d| / |x|.
+# The flag `direction_check_passed` (ρ <= 1/2) is a cheap heuristic, not a guarantee: it tests M⁻¹A
+# only in the direction of d. A badly rounded Float32 pivot in components that d hardly touches can
+# pass it while the estimate is far too small (review case: 384x). It must not on its own release
+# automatic decisions (e.g. skipping a Float64 recompute); that needs a factorization-based safeguard.
+# Residual columns are scaled by a power of two chosen so that d is O(1) in the Float32 solve, so
+# tiny or huge excitations neither underflow nor overflow; a non-finite estimate is stored as NaN,
+# reported as `nothing` (JSON null) and fails the check.
 # Cost: one matrix product and two solves with the existing factor.
 # Scope: solver error for the assembled system, not discretization or assembly error.
 # BLAB_DENSE_ERROR_ESTIMATE=0 skips it.
 const DENSE_ESTIMATE_MAX_CONTRACTION = 0.5
 _dense_error_estimate_enabled() = !(lowercase(strip(get(ENV, "BLAB_DENSE_ERROR_ESTIMATE", "1"))) in ("0", "off", "false"))
 
-_column_scales(x) = [let m = norm(view(x, :, j), Inf); (iszero(m) || !isfinite(m)) ? 1.0 : exp2(-exponent(m)) end
-                     for j in axes(x, 2)]
+_pow2_exponent(m) = (iszero(m) || !isfinite(m)) ? 0 : exponent(m)
+
+# 2^k per column with |r| 2^k ≈ |b| / |x|, so that M⁻¹ (r 2^k) ≈ O(1) when M⁻¹ maps |b| to |x|.
+_residual_scales(residual, target, solution) =
+    [exp2(-_pow2_exponent(norm(view(residual, :, j), Inf)) + _pow2_exponent(norm(view(target, :, j), Inf)) -
+          _pow2_exponent(norm(view(solution, :, j), Inf))) for j in axes(residual, 2)]
 
 """
-    _dense_error_estimate(apply, multiply, solution, residual) -> (estimates, reliable)
+    _dense_error_estimate(apply, multiply, solution, residual, target) -> (estimates, direction_check_passed)
 
 `apply(r)` applies the solver's factor M⁻¹, `multiply(y)` returns `A y` in Float64, `residual` is
-the final residual `b - A solution`. See the comment above `DENSE_ESTIMATE_MAX_CONTRACTION`.
+the final residual `target - A solution`. See the comment above `DENSE_ESTIMATE_MAX_CONTRACTION`.
 """
-function _dense_error_estimate(apply, multiply, solution::AbstractMatrix, residual::AbstractMatrix)
-    scales = _column_scales(residual)
+function _dense_error_estimate(apply, multiply, solution::AbstractMatrix, residual::AbstractMatrix,
+                               target::AbstractMatrix)
+    scales = _residual_scales(residual, target, solution)
     d = apply(residual .* transpose(scales))          # scaled d; unscaled below
     w = apply(multiply(d))
-    estimates = Float64[]; reliable = Bool[]
+    estimates = Float64[]; passed = Bool[]
     for j in axes(solution, 2)
         e = norm(view(d, :, j), Inf)
         rho = iszero(e) ? 0.0 : norm(view(w, :, j) - view(d, :, j), Inf) / e
-        ok = isfinite(rho) && rho <= DENSE_ESTIMATE_MAX_CONTRACTION
-        push!(reliable, ok)
         x = max(norm(view(solution, :, j), Inf), floatmin(Float64))
-        push!(estimates, (ok ? e / (1 - rho) : e) / scales[j] / x)
+        ok = isfinite(rho) && rho <= DENSE_ESTIMATE_MAX_CONTRACTION
+        estimate = (ok ? e / (1 - rho) : e) / scales[j] / x
+        push!(passed, ok && isfinite(estimate))
+        push!(estimates, isfinite(estimate) ? estimate : NaN)
     end
-    return estimates, reliable
+    return estimates, passed
 end
 const DENSE_GMRES_IR_RESTART = 30
 const DENSE_GMRES_IR_MAX_CYCLES = 10
@@ -433,7 +442,7 @@ mutable struct SplitRefinedLU
     fallback_reason::Union{Nothing,String}
     backward_error::Float64
     estimated_error::Vector{Float64}          # per column of the last solve, see _dense_error_estimate
-    estimate_reliable::Vector{Bool}
+    estimate_direction_check::Vector{Bool}
     spill_path::Union{Nothing,String}
     # A factor held elsewhere (the CUDA LU on the device): `device_solve(x::Matrix{ComplexF32})`
     # returns the ComplexF64 host solution, `release_device()` frees it. `factor` is then nothing.
@@ -579,10 +588,10 @@ function _split_solve_columns(factorization::SplitRefinedLU, target::Matrix{Comp
         apply = isnothing(factorization.fallback) ? (r -> _split_precondition(factorization, r)) :
                                                     (r -> factorization.fallback \ r)
         multiply = y -> _split_mul!(similar(y), factorization.store, factorization.matrix, y, one(ComplexF64), zero(ComplexF64))
-        factorization.estimated_error, factorization.estimate_reliable =
-            _dense_error_estimate(apply, multiply, solution, residual)
+        factorization.estimated_error, factorization.estimate_direction_check =
+            _dense_error_estimate(apply, multiply, solution, residual, target)
     else
-        factorization.estimated_error, factorization.estimate_reliable = Float64[], Bool[]
+        factorization.estimated_error, factorization.estimate_direction_check = Float64[], Bool[]
     end
     return solution
 end

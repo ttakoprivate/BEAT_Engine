@@ -94,21 +94,24 @@ coexist on the device while the system is built.
 `dense_refinement_backward_error`, `dense_gmres_ir_iterations`,
 `dense_split_border_columns/rows`, `dense_split_stray_entries` (expected 0) and `dense_spill`.
 
-Error estimate: `dense_estimated_relative_error` (worst excitation),
-`dense_estimated_relative_error_per_excitation`, `dense_estimate_reliable` and
-`dense_estimate_reliable_per_excitation`. After an accepted solve, from the final Float64 residual
-r: d = M⁻¹ r and w = M⁻¹ (A d) with the solver's own factor M; ρ = |w − d| / |d| measures how far
-M⁻¹A is from the identity in the direction of d. The estimate is |d| / (1 − ρ) / |x| per excitation
-when ρ ≤ 1/2; otherwise the excitation is marked unreliable (the factor is not a good inverse there,
-e.g. a Float32 pivot shifted by rounding) and |d| / |x| is only an indication. Residual columns are
-scaled by a power of two before the Float32 solve. Cost: one matrix product and two solves with the
-existing factor per solve. Scope: the solver's error for the assembled system, not discretization
-error and not Float32 assembly error. The solution is not changed. Against a 160-bit reference
-(κ 1e3 to 1e8, `split_dense_tests.jl`): reliable excitations are within a factor 10 of the true
-error (observed ≤ 2.5); at κ ≤ 1e6 all are reliable; the two shifted-pivot cases from the review
-(32x and 2048x underestimation) are marked unreliable. After a `SplitGMRES` fallback the LU's
-estimate is reported. `BLAB_DENSE_ERROR_ESTIMATE=0` skips it. Mapping d to per-output dB (polars,
-velocity, current) is the next step.
+Error estimate: `dense_estimated_relative_error` (worst finite excitation),
+`dense_estimated_relative_error_per_excitation` (`null` where not finite),
+`dense_estimate_direction_check_passed` and `..._per_excitation`. After an accepted solve, from the
+final Float64 residual r: d = M⁻¹ r and w = M⁻¹ (A d) with the solver's own factor M; ρ = |w − d| /
+|d|. The estimate is |d| / (1 − ρ) / |x| per excitation when ρ ≤ 1/2, else |d| / |x|. Residual columns
+are scaled by a power of two so that d is O(1) in the Float32 solve. Cost: one matrix product and two
+solves with the existing factor per solve. Scope: the solver's error for the assembled system, not
+discretization error and not Float32 assembly error. The solution is not changed.
+
+The direction check is a heuristic: it tests M⁻¹A only in the direction of d. A Float32 pivot shifted
+by rounding in components that d hardly touches can pass it while the estimate is far too small
+(review example: 384x, kept as a `@test_broken`). It must not on its own release automatic decisions
+such as skipping a Float64 recompute; that needs a factorization-based safeguard (issue #6).
+Validation: against a 160-bit reference (κ 1e3 to 1e8) excitations that pass the check are within a
+factor 10 of the true error (observed ≤ 2.5); on the real h343 model at 20 kHz (Mac, Metal) the
+estimate matched the true 0.9-13 % error of a run with `DENSE_SPLIT=off` and reports 1e-9 .. 5e-9 in the
+default path. `BLAB_DENSE_ERROR_ESTIMATE=0` skips it. Mapping d to per-output dB (polars, velocity,
+current) is the next step.
 
 ## Not covered yet
 - Dense LU through Apple Accelerate (AMX/SME) instead of OpenBLAS; benchmark pending.
