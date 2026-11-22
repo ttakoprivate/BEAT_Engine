@@ -73,7 +73,10 @@ function capture(s, ::Type{T}, f) where {T}
     A = F isa BeatEngineCoupledCondensed.RefinedDenseLU ? copy(F.matrix) :
         F isa LinearAlgebra.LU ? Matrix(F.P' * (F.L * F.U)) : error("unexpected factorization $(typeof(F))")
     ranges = (bem=system.bem_range, mechanical=system.mechanical_range, electrical=system.electrical_range)
-    factor = F isa BeatEngineCoupledCondensed.RefinedDenseLU ? F.factor : nothing   # productive ComplexF32 LU
+    # productive factor: the ComplexF32 LU, or the Float64 LU when RefinedDenseLU fell back (factor = nothing)
+    factor = F isa BeatEngineCoupledCondensed.RefinedDenseLU ? something(F.fallback, F.factor) : nothing
+    F isa BeatEngineCoupledCondensed.RefinedDenseLU && F.fallback !== nothing &&
+        println("  note: the mixed solve fell back to a Float64 LU ($(F.fallback_reason)); the adjoint uses that factor")
     result = (; A, b=recorder.rhs[], x=recorder.solution[], ranges, solver=typeof(F), factor)
     release_condensed_coupled_system!(system)
     return result
@@ -179,7 +182,8 @@ function row_check(mix, full, x_mix, x_64; label, sizes=(16, 64, 256), seeds=1:2
         names = vcat(["current", "velocity"], worst === nothing ? String[] : ["p_bem[worst]"], ["p_bem[1]", "p_bem[mid]"])
         G = zeros(ComplexF64, n, length(outputs))
         for (k, i) in enumerate(outputs); G[i, k] = 1; end
-        Z = ComplexF64.(factor32' \ ComplexF32.(G))            # adjoint with the productive Float32 factor
+        Z = eltype(factor32) == ComplexF32 ? ComplexF64.(factor32' \ ComplexF32.(G)) :   # productive Float32 factor
+            factor32' \ G                                                              # or its Float64 fallback
         Z64 = factor64' \ G
         println("  row check ($label), excitation $e (worst BEM node $worst): complex relative error " *
                 "|estimate - truth| / |truth| of the assembly contribution gᴴ(x_64 - x_mix)")
