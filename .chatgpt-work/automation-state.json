@@ -21,42 +21,43 @@
     22
   ],
   "lease": {
-    "holder": "work14-mwt9wnax",
-    "acquired_at": "2026-11-23T13:00:03.705Z",
-    "expires_at": "2026-11-23T14:47:39.871Z",
+    "holder": null,
+    "acquired_at": null,
+    "expires_at": null,
     "fencing_token": 6
   },
   "last_completed_run": {
-    "id": "work13-mwt7x8xl",
-    "started_at": "2026-11-23T12:04:32.505Z",
-    "completed_at": "2026-11-23T12:08:13.138Z",
-    "status": "formal_review_and_python_regression_verified",
+    "id": "work14-mwt9wnax",
+    "started_at": "2026-11-23T13:00:03.705Z",
+    "completed_at": "2026-11-23T13:27:28.587Z",
+    "status": "reference_review_followup_published",
     "source_commit": "b34abee291207a13876068c99948d8ca386756fa",
     "checked_heads": {
-      "3": "10b86e208872cb795dcb7f972eec2d6a12ed09ec",
       "9": "3d639cef853f6c60caa36fda4a8b39f28baec3f7",
       "14": "e9af918a436f93afdb630f06af539d08f45f46c8",
-      "17": "ab90c26aebfdc79fd85bc0b777413a17e558f004",
-      "18": "1800d831b05624c533ce9645eaf4721e6b71d5c1"
+      "17": "b09247b0e641a97fbd4d9cc975658d43403ca148",
+      "hmatrix-dev": "67572af14f74fbcabcb07c817d47492148a75320"
     },
-    "source_changes": false,
+    "source_changes": true,
     "tests_rerun": true,
     "actions": [
       {
-        "pr": 3,
-        "review_id": 6021393800,
-        "url": "https://github.com/ttakoprivate/BEAT_Engine/pull/3#pullrequestreview-6021393800"
+        "pr": 17,
+        "commit": "b09247b0e641a97fbd4d9cc975658d43403ca148",
+        "url": "https://github.com/ttakoprivate/BEAT_Engine/pull/17",
+        "comment_id": 7102529976,
+        "ready": true
       },
       {
-        "pr": 18,
-        "review_id": 6021416647,
-        "url": "https://github.com/ttakoprivate/BEAT_Engine/pull/18#pullrequestreview-6021416647"
+        "issue": 11,
+        "comment_id": 7102548478,
+        "url": "https://github.com/ttakoprivate/BEAT_Engine/issues/11#issuecomment-7102548478"
       }
     ],
-    "evidence": "PR3 formal approve follows prior independently executed 45/45 and 378/378 results on unchanged 10b86e2; no Julia rerun. PR18 old subprocess failure reproduced; Python suite 256 passed/1 Windows skip with installation and without installation, Ruff passed. All exits 0 except expected old child exit 1.",
+    "evidence": "Claude independently reviewed ab90c26 (review6021634723). All three optional follow-ups implemented in b09247b: required diagnostic fields, tighter 1e-4 fixture gate, estimator regression explanation. Tested files byte-identical to published commit. Julia1.12.6 SHA256 verified, CPU project instantiated and overlay pinned. Independent suite380/380 and standalone reference gate4394/4394, exit0, no skips. All six physical pointwise complex relative output tables published; exact zero Neumann errors0Pa/m.",
     "pending": [
-      "PR17 and PR14 still require independent review; h343 hardware qualification remains pending.",
-      "VACS sample and format answers remain pending in issue12."
+      "Claude review of small b09247b follow-up and owner merge of PR17; PR14 independent review remains pending.",
+      "h343 hardware qualification remains separate; VACS sample/format answers pending issue12."
     ],
     "continuation": "Execution and GitHub access work. Continue checking for new assigned work and Claude changes; normal external approval/data waits do not require stopping this worker. Do not repeat unchanged blocker notices or owner questions."
   },
