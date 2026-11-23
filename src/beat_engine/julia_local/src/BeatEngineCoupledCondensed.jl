@@ -192,6 +192,9 @@ about `κ(A) eps(Float32)`; the Multi_region_SAWMOD systems (κ ≈ 5e6) converg
 The stopping test is LAPACK `zcgesv`'s backward error, `‖r‖∞ ≤ ‖x‖∞ ‖A‖∞ eps(Float64) √n` per
 column (`‖A‖∞` the operator norm, `opnorm`), which is what a `ComplexF64` LU attains, whatever `κ`.
 Convergence is tested before the stall rule, so a solve already at that level is accepted.
+In addition every column must pass the componentwise backward-error test (see
+`_dense_componentwise_enabled` in BeatEngineSplitDense.jl); stall and convergence act on
+`max(normwise ratio, ω / tolerance)`. `componentwise_backward_error` is the worst column's ω.
 
 The `ComplexF64` LU is used instead, with the reason in `fallback_reason`, when
 - an entry is outside the `Float32` range (narrowing would overflow),
@@ -216,13 +219,17 @@ mutable struct RefinedDenseLU
     iterations::Int
     fallback_reason::Union{Nothing,String}
     backward_error::Float64
+    componentwise_backward_error::Float64   # worst column ω of the last solve (NaN when the test is off)
+    componentwise_tolerance::Float64        # NaN when BLAB_COUPLED_DENSE_COMPONENTWISE=0
     estimated_error::Vector{Float64}   # per column of the last solve (see _dense_error_estimate)
     estimate_direction_check::Vector{Bool}
+    fallback_refinement_steps::Int     # most Float64 refinement steps after the fallback (any solve)
 end
 
 function RefinedDenseLU(matrix::Matrix{ComplexF64})
     all(isfinite, matrix) || throw(ArgumentError("dense coupled matrix has non-finite entries"))
-    refined = RefinedDenseLU(matrix, opnorm(matrix, Inf), nothing, nothing, 0, nothing, NaN, Float64[], Bool[])
+    tolerance = _dense_componentwise_enabled() ? _dense_componentwise_tolerance(size(matrix, 1)) : NaN
+    refined = RefinedDenseLU(matrix, opnorm(matrix, Inf), nothing, nothing, 0, nothing, NaN, NaN, tolerance, Float64[], Bool[], 0)
     if maximum(abs, matrix; init=0.0) > floatmax(Float32)
         _dense_fall_back!(refined, "an entry is outside the Float32 range")
     else
@@ -246,15 +253,24 @@ end
 
 Base.size(factorization::RefinedDenseLU, dims...) = size(factorization.matrix, dims...)
 
-# Worst column's backward error, in units of the double-precision attainable one.
-function _dense_backward_error_ratio(factorization::RefinedDenseLU, residual, solution)
+# Per column backward error, in units of the double-precision attainable one.
+function _dense_backward_error_ratios(factorization::RefinedDenseLU, residual, solution)
     threshold = factorization.matrix_norm * eps(Float64) * sqrt(size(factorization.matrix, 1))
-    return maximum(
-        column -> norm(view(residual, :, column), Inf) /
-                  max(norm(view(solution, :, column), Inf) * threshold, floatmin(Float64)),
-        axes(solution, 2);
-        init=0.0,
-    )
+    return [norm(view(residual, :, column), Inf) /
+            max(norm(view(solution, :, column), Inf) * threshold, floatmin(Float64)) for column in axes(solution, 2)]
+end
+
+_as_matrix(x) = x isa AbstractVector ? reshape(x, :, 1) : x
+
+# Residual, then per column (combined acceptance ratio, normwise ratio); see _acceptance_ratios.
+function _dense_acceptance!(residual, factorization::RefinedDenseLU, target, solution)
+    _dense_residual!(residual, factorization, target, solution)
+    r, x, b = _as_matrix(residual), _as_matrix(solution), _as_matrix(target)
+    normwise = _dense_backward_error_ratios(factorization, r, x)
+    absolute = isnan(factorization.componentwise_tolerance) ? nothing : _dense_abs_product(factorization.matrix, x)
+    ratios, componentwise = _acceptance_ratios(normwise, r, absolute, b, factorization.componentwise_tolerance)
+    factorization.componentwise_backward_error = isempty(componentwise) ? NaN : maximum(componentwise)
+    return ratios, normwise
 end
 
 function _dense_residual!(residual, factorization::RefinedDenseLU, target, solution)
@@ -288,18 +304,20 @@ function _refined_solve!(factorization::RefinedDenseLU, target, residual)
         previous = Inf
         reason = nothing
         for iteration in 0:DENSE_REFINEMENT_MAX_ITERATIONS
-            ratio = _dense_backward_error_ratio(factorization, _dense_residual!(residual, factorization, target, solution), solution)
-            if !isfinite(ratio)
+            ratios, normwise = _dense_acceptance!(residual, factorization, target, solution)
+            ratio = maximum(ratios; init=0.0)
+            if !all(isfinite, normwise) || isnan(ratio)
                 reason = "non-finite residual after $iteration refinement steps"
                 break
             end
             if ratio <= 1
-                factorization.backward_error = ratio
+                factorization.backward_error = maximum(normwise; init=0.0)
                 return solution
             end
             iteration == DENSE_REFINEMENT_MAX_ITERATIONS && break
             if ratio > previous / 2
-                reason = "refinement stalled at $(ratio)x the Float64 backward error after $iteration steps"
+                reason = "refinement stalled at $(ratio)x the Float64 backward error after $iteration steps" *
+                         _componentwise_note(factorization)
                 break
             end
             previous = ratio
@@ -307,12 +325,13 @@ function _refined_solve!(factorization::RefinedDenseLU, target, residual)
             factorization.iterations = max(factorization.iterations, iteration + 1)
         end
         isnothing(reason) &&
-            (reason = "refinement did not reach the Float64 backward error in $(DENSE_REFINEMENT_MAX_ITERATIONS) steps")
+            (reason = "refinement did not reach the Float64 backward error in $(DENSE_REFINEMENT_MAX_ITERATIONS) steps" *
+                      _componentwise_note(factorization))
         _dense_fall_back!(factorization, reason)
     end
-    solution = factorization.fallback \ target
-    factorization.backward_error =
-        _dense_backward_error_ratio(factorization, _dense_residual!(residual, factorization, target, solution), solution)
+    solution, normwise = _refine_fallback!(x -> _dense_acceptance!(residual, factorization, target, x),
+                                           factorization.fallback, factorization.fallback \ target, residual, factorization)
+    factorization.backward_error = maximum(normwise; init=0.0)
     return solution
 end
 
@@ -320,7 +339,10 @@ end
 # shared with the CUDA coupled path.
 using ..BeatEngineCoupled: SplitDenseMatrix, adopt_square_storage, SplitRefinedLU, SplitGMRES, _dense_solver_mode, release_split_factor!, _dense_split_enabled,
     _dense_spill_target, _dense_gmres_ir_enabled, _split_mul!, _split_opnorm_inf, _split_materialize,
-    _split_precondition_double, _dense_error_estimate_enabled, _dense_error_estimate
+    _split_precondition_double, _dense_error_estimate_enabled, _dense_error_estimate,
+    _dense_componentwise_enabled, _dense_componentwise_tolerance, _dense_abs_product, _acceptance_ratios,
+    _componentwise_backward_errors, _refine_fallback!,
+    _componentwise_note
 
 """
     dense_solver_diagnostics(system) -> Dict{String,Any}
@@ -329,7 +351,10 @@ The dense coupled factorization that ran: `dense_solver` (`lu_float32`, `lu_floa
 `lu_float32_refined`, `lu_float32_split_refined` / `lu_float32_split_gmres_ir` (split storage,
 BeatEngineSplitDense.jl), or `lu_float64_fallback` after a refinement fallback),
 `dense_refinement_iterations`, `dense_refinement_fallback_reason` and `dense_refinement_backward_error`
-(the last solve's worst column, in units of the Float64 attainable backward error).
+(the last solve's worst column, in units of the Float64 attainable backward error),
+`dense_refinement_componentwise_backward_error` (worst column ω of the last solve) and
+`dense_refinement_componentwise_tolerance` (`nothing` when `BLAB_COUPLED_DENSE_COMPONENTWISE=0`) and
+`dense_refinement_fallback_steps` (Float64 refinement steps after a Float64 LU fallback, see `_refine_fallback!`).
 For the refined solvers (and after a `SplitGMRES` fallback) also `dense_estimated_relative_error`
 (worst excitation), `dense_estimated_relative_error_per_excitation` (`nothing` where not finite),
 `dense_estimate_direction_check_passed` and `dense_estimate_direction_check_passed_per_excitation`:
@@ -353,6 +378,13 @@ function _estimate_diagnostics(factorization)
             "dense_estimate_direction_check_passed_per_excitation" => factorization.estimate_direction_check)
 end
 
+_componentwise_diagnostics(factorization) =
+    ("dense_refinement_fallback_steps" => factorization.fallback_refinement_steps,
+     "dense_refinement_componentwise_backward_error" =>
+         isfinite(factorization.componentwise_backward_error) ? factorization.componentwise_backward_error : nothing,
+     "dense_refinement_componentwise_tolerance" =>
+         isnan(factorization.componentwise_tolerance) ? nothing : factorization.componentwise_tolerance)
+
 function _dense_solver_diagnostics(system)
     factorization = hasproperty(system, :factorization) ? system.factorization : nothing
     if factorization isa SplitGMRES
@@ -369,6 +401,7 @@ function _dense_solver_diagnostics(system)
             "dense_refinement_fallback_reason" => factorization.fallback_reason,
             # after a fallback the LU's estimate is the relevant one; without it GMRES gives none
             (isnothing(factorization.fallback) ? () : _estimate_diagnostics(factorization.fallback))...,
+            (isnothing(factorization.fallback) ? () : _componentwise_diagnostics(factorization.fallback))...,
         )
     end
     if factorization isa SplitRefinedLU
@@ -379,6 +412,7 @@ function _dense_solver_diagnostics(system)
             "dense_refinement_iterations" => factorization.iterations,
             "dense_refinement_fallback_reason" => factorization.fallback_reason,
             "dense_refinement_backward_error" => isnan(factorization.backward_error) ? nothing : factorization.backward_error,
+            _componentwise_diagnostics(factorization)...,
             _estimate_diagnostics(factorization)...,
             "dense_gmres_ir_iterations" => factorization.gmres_iterations,
             "dense_split_border_columns" => length(factorization.matrix.border_columns),
@@ -394,6 +428,7 @@ function _dense_solver_diagnostics(system)
             "dense_refinement_iterations" => factorization.iterations,
             "dense_refinement_fallback_reason" => factorization.fallback_reason,
             "dense_refinement_backward_error" => isnan(factorization.backward_error) ? nothing : factorization.backward_error,
+            _componentwise_diagnostics(factorization)...,
             _estimate_diagnostics(factorization)...,
             "dense_lu_library" => dense_lu_library_diagnostic(ComplexF32),
         )

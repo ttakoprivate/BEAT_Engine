@@ -55,6 +55,87 @@ _dense_gmres_ir_enabled() = lowercase(strip(get(ENV, "BLAB_COUPLED_DENSE_GMRES_I
 
 const SPLIT_REFINEMENT_MAX_ITERATIONS = 10       # as DENSE_REFINEMENT_MAX_ITERATIONS
 
+# Componentwise acceptance (RefinedDenseLU and SplitRefinedLU).
+#
+# The normwise test `‖r‖∞ ≤ ‖x‖∞ ‖A‖∞ eps(Float64) √n` accepts a solution whose small components
+# are wrong when rows or unknowns are badly scaled (interface flux ~1e4 next to pressure ~5): the
+# residual of the small components drowns in `‖x‖∞ ‖A‖∞`. A solution is therefore accepted only if,
+# per excitation j, also the componentwise (Oettli-Prager) backward error
+#   ω_j = max_i |b - A x|ᵢⱼ / (|A| |xⱼ| + |bⱼ|)ᵢ
+# is at most `_dense_componentwise_tolerance(n)`. A row with zero residual contributes zero; a
+# non-zero residual over a vanishing denominator gives ω = Inf (never accepted). The default
+# tolerance 2 (n + 1) eps(Float64) covers the rounding of the Float64 residual product itself
+# (|computed - exact| ≤ γ_{n+1} (|A||x| + |b|)) and of x, so a solution at Float64 accuracy passes.
+# Both tests are combined into one ratio per excitation, max(normwise ratio, ω / tolerance), which
+# drives the existing convergence (≤ 1), stall (fails to halve) and iteration-limit rules.
+# `|A| |x|` is accumulated in the residual pass over the same column panels (SplitRefinedLU) or
+# in one extra pass over the Float64 matrix (RefinedDenseLU). For split storage `|hi| + |Δ|`
+# replaces `|hi + Δ|` on the border, an upper bound within a factor 1 + 2 eps(Float32).
+# Note: a small backward error does not imply a small forward error for an ill-conditioned system.
+#   BLAB_COUPLED_DENSE_COMPONENTWISE=0      normwise test only (the previous behaviour)
+#   BLAB_COUPLED_DENSE_COMPONENTWISE_TOL=ω  absolute tolerance on ω instead of 2 (n + 1) eps
+_dense_componentwise_enabled() =
+    !(lowercase(strip(get(ENV, "BLAB_COUPLED_DENSE_COMPONENTWISE", "1"))) in ("0", "off", "false", "no"))
+
+function _dense_componentwise_tolerance(n::Integer)
+    setting = strip(get(ENV, "BLAB_COUPLED_DENSE_COMPONENTWISE_TOL", ""))
+    isempty(setting) && return 2.0 * (n + 1) * eps(Float64)
+    tolerance = tryparse(Float64, setting)
+    (tolerance === nothing || !(0 < tolerance < Inf)) &&
+        error("BLAB_COUPLED_DENSE_COMPONENTWISE_TOL must be a positive number: $setting")
+    return tolerance
+end
+
+# |z| without hypot's cost; falls back to abs() where abs2 under- or overflows
+@inline function _abs_entry(z::Complex)
+    a = sqrt(abs2(ComplexF64(z)))
+    return (isfinite(a) && (a > 0 || iszero(z))) ? a : abs(ComplexF64(z))
+end
+
+"""Per column `max_i |residual|ᵢ / (absolute + |target|)ᵢ` (`absolute = |A| |x|`), see above."""
+function _componentwise_backward_errors(residual::AbstractMatrix, absolute::AbstractMatrix, target::AbstractMatrix)
+    errors = zeros(Float64, size(residual, 2))
+    @inbounds for j in axes(residual, 2)
+        worst = 0.0
+        for i in axes(residual, 1)
+            r = abs(residual[i, j])
+            iszero(r) && continue
+            denominator = absolute[i, j] + abs(target[i, j])
+            worst = max(worst, denominator > 0 ? r / denominator : Inf)   # NaN propagates
+        end
+        errors[j] = worst
+    end
+    return errors
+end
+
+"""`|A| |x|` for a dense matrix, one column panel at a time (no n² temporary)."""
+function _dense_abs_product(matrix::AbstractMatrix, x::AbstractMatrix)
+    n = size(matrix, 1)
+    width = max(1, min(size(matrix, 2), DENSE_SPLIT_PANEL_BYTES ÷ (16 * max(n, 1))))
+    panel = Matrix{Float64}(undef, n, width)
+    absolute_x = _abs_entry.(x)
+    result = zeros(Float64, n, size(x, 2))
+    for first_column in 1:width:size(matrix, 2)
+        columns = first_column:min(first_column + width - 1, size(matrix, 2))
+        block = view(panel, :, 1:length(columns))
+        block .= _abs_entry.(view(matrix, :, columns))
+        mul!(result, block, view(absolute_x, columns, :), 1.0, 1.0)
+    end
+    return result
+end
+
+"""
+    _acceptance_ratios(normwise, residual, absolute, target, tolerance) -> (ratios, componentwise)
+
+Per column `max(normwise, ω / tolerance)`; `absolute === nothing` (componentwise test off) returns
+`normwise` and an empty `componentwise`.
+"""
+function _acceptance_ratios(normwise::Vector{Float64}, residual, absolute, target, tolerance::Float64)
+    absolute === nothing && return normwise, Float64[]
+    componentwise = _componentwise_backward_errors(residual, absolute, target)
+    return [isnan(c) ? NaN : max(w, c / tolerance) for (w, c) in zip(normwise, componentwise)], componentwise
+end
+
 # A-posteriori solver-error estimate after an accepted solve (diagnostics only, the solution is
 # not changed). From the final Float64 residual r:
 #   d = M⁻¹ r                 (M: the factor the solver used; d ≈ x_exact - x when M⁻¹A ≈ I)
@@ -72,6 +153,52 @@ const SPLIT_REFINEMENT_MAX_ITERATIONS = 10       # as DENSE_REFINEMENT_MAX_ITERA
 # Cost: one matrix product and two solves with the existing factor.
 # Scope: solver error for the assembled system, not discretization or assembly error.
 # BLAB_DENSE_ERROR_ESTIMATE=0 skips it.
+# After the Float64 LU fallback: up to FALLBACK_REFINEMENT_STEPS steps of fixed-precision refinement
+# with that LU while the combined acceptance ratio (normwise and componentwise) exceeds 1 and
+# decreases. One such step already makes a backward-stable LU solution componentwise stable under
+# mild conditions (Skeel 1980); a large element growth can otherwise leave ω above the tolerance.
+# A step that does not lower the ratio is discarded. If the ratio still exceeds 1 the solution is
+# returned with a warning and a note in `fallback_reason` (the Float64 LU is the last resort; the
+# achieved ω is in the diagnostics). With BLAB_COUPLED_DENSE_COMPONENTWISE=0 nothing changes. `acceptance!(x)` recomputes `residual` for x and returns
+# (ratios, normwise); on return `residual` belongs to the returned solution.
+const FALLBACK_REFINEMENT_STEPS = 2
+
+function _refine_fallback!(acceptance!, fallback, solution, residual, factorization)
+    ratios, normwise = acceptance!(solution)
+    isnan(factorization.componentwise_tolerance) && return solution, normwise   # test off: previous behaviour
+    # per right-hand side: refine only the open columns and keep each column's best iterate, so a
+    # column that is not helped cannot discard the correction of an independent one (review PR #15)
+    columns = solution isa AbstractVector ? reshape(solution, :, 1) : solution
+    open = [isfinite(w) && r > 1 for (w, r) in zip(normwise, ratios)]
+    best = copy(ratios)
+    steps = 0
+    while steps < FALLBACK_REFINEMENT_STEPS && any(open)
+        correction = fallback \ (residual isa AbstractVector ? residual : residual[:, open])
+        candidate = copy(columns)
+        candidate[:, open] .+= correction isa AbstractVector ? reshape(correction, :, 1) : correction
+        candidate_ratios, _ = acceptance!(solution isa AbstractVector ? vec(candidate) : candidate)
+        improved = open .& (candidate_ratios .< best)
+        if !any(improved)
+            ratios, normwise = acceptance!(solution)          # restore the residual of the kept iterate
+            break
+        end
+        columns[:, improved] .= candidate[:, improved]
+        best[improved] .= candidate_ratios[improved]
+        open .= improved .& (best .> 1)
+        steps += 1
+        # the residual must belong to the current iterate before the next correction or on return
+        ratios, normwise = acceptance!(solution)
+    end
+    factorization.fallback_refinement_steps = max(factorization.fallback_refinement_steps, steps)
+    if maximum(ratios; init=0.0) > 1
+        note = "componentwise backward error $(factorization.componentwise_backward_error) above the tolerance " *
+               "$(factorization.componentwise_tolerance) after the Float64 LU and $steps refinement step(s)"
+        factorization.fallback_reason = something(factorization.fallback_reason, "Float64 LU") * "; " * note
+        @warn note
+    end
+    return solution, normwise
+end
+
 const DENSE_ESTIMATE_MAX_CONTRACTION = 0.5
 _dense_error_estimate_enabled() = !(lowercase(strip(get(ENV, "BLAB_DENSE_ERROR_ESTIMATE", "1"))) in ("0", "off", "false"))
 
@@ -374,12 +501,17 @@ at a time, so the product streams `store` once.
 const SPLIT_MUL_CALLS = Threads.Atomic{Int}(0)    # full matrix streams; read by the tests
 
 function _split_mul!(result::AbstractMatrix{ComplexF64}, store::AbstractMatrix{ComplexF32}, matrix::SplitDenseMatrix,
-                     x::AbstractMatrix{ComplexF64}, alpha::ComplexF64, beta::ComplexF64)
+                     x::AbstractMatrix{ComplexF64}, alpha::ComplexF64, beta::ComplexF64;
+                     absolute::Union{Nothing,Matrix{Float64}}=nothing)
     Threads.atomic_add!(SPLIT_MUL_CALLS, 1)
     n = size(store, 1)
     width = max(1, min(size(store, 2), DENSE_SPLIT_PANEL_BYTES ÷ (16 * n)))
     panel = Matrix{ComplexF64}(undef, n, width)
     panel32 = Matrix{ComplexF32}(undef, n, width)
+    # `absolute` (optional) receives |M| |x| from the same panels (|hi| + |Δ| on the border)
+    absolute_panel = absolute === nothing ? nothing : Matrix{Float64}(undef, n, width)
+    absolute_x = absolute === nothing ? nothing : _abs_entry.(x)
+    absolute === nothing || fill!(absolute, 0.0)
     iszero(beta) ? fill!(result, zero(ComplexF64)) : (isone(beta) || (result .*= beta))
     for first_column in 1:width:size(store, 2)
         last_column = min(first_column + width - 1, size(store, 2))
@@ -389,18 +521,29 @@ function _split_mul!(result::AbstractMatrix{ComplexF64}, store::AbstractMatrix{C
         block = view(panel, :, 1:length(columns))
         block .= loaded
         mul!(result, block, view(x, columns, :), alpha, one(ComplexF64))
+        if absolute !== nothing
+            absolute_block = view(absolute_panel, :, 1:length(columns))
+            absolute_block .= _abs_entry.(block)
+            mul!(absolute, absolute_block, view(absolute_x, columns, :), 1.0, 1.0)
+        end
     end
     # Border columns: every row; border rows: outside the border columns; strays.
-    isempty(matrix.border_columns) ||
+    if !isempty(matrix.border_columns)
         mul!(result, matrix.dcol, x[matrix.border_columns, :], alpha, one(ComplexF64))
+        absolute === nothing ||
+            mul!(absolute, _abs_entry.(matrix.dcol), absolute_x[matrix.border_columns, :], 1.0, 1.0)
+    end
     if !isempty(matrix.border_rows)
         row_part = matrix.drow * x                         # border-column entries of drow are zero
+        absolute_row_part = absolute === nothing ? nothing : _abs_entry.(matrix.drow) * absolute_x
         for (slot, row) in enumerate(matrix.border_rows)
             @views result[row, :] .+= alpha .* row_part[slot, :]
+            absolute === nothing || (@views absolute[row, :] .+= absolute_row_part[slot, :])
         end
     end
     for ((i, j), correction) in matrix.stray
         @views result[i, :] .+= (alpha * correction) .* x[j, :]
+        absolute === nothing || (@views absolute[i, :] .+= _abs_entry(correction) .* absolute_x[j, :])
     end
     return result
 end
@@ -454,6 +597,8 @@ mutable struct SplitRefinedLU
     gmres_iterations::Int
     fallback_reason::Union{Nothing,String}
     backward_error::Float64
+    componentwise_backward_error::Float64     # worst column ω of the last solve (NaN when the test is off)
+    componentwise_tolerance::Float64          # NaN when BLAB_COUPLED_DENSE_COMPONENTWISE=0
     estimated_error::Vector{Float64}          # per column of the last solve, see _dense_error_estimate
     estimate_direction_check::Vector{Bool}
     spill_path::Union{Nothing,String}
@@ -461,7 +606,10 @@ mutable struct SplitRefinedLU
     # returns the ComplexF64 host solution, `release_device()` frees it. `factor` is then nothing.
     device_solve::Union{Nothing,Function}
     release_device::Union{Nothing,Function}
+    fallback_refinement_steps::Int            # most Float64 refinement steps after the fallback (any solve)
 end
+
+_split_componentwise_tolerance(n) = _dense_componentwise_enabled() ? _dense_componentwise_tolerance(n) : NaN
 
 function _split_spill(hi::Matrix{ComplexF32}, directory::AbstractString)
     store = SpilledMatrix(hi, directory)
@@ -476,8 +624,8 @@ function SplitRefinedLU(matrix::SplitDenseMatrix)
     spill_directory = _dense_spill_target(n)
     matrix_norm = _split_opnorm_inf(matrix.hi, matrix)
     store, spill_path = isnothing(spill_directory) ? (matrix.hi, nothing) : _split_spill(matrix.hi, spill_directory)
-    refined = SplitRefinedLU(matrix, store, matrix_norm, nothing, nothing, 0, 0, nothing, NaN, Float64[], Bool[], spill_path,
-                             nothing, nothing)
+    refined = SplitRefinedLU(matrix, store, matrix_norm, nothing, nothing, 0, 0, nothing, NaN, NaN,
+                             _split_componentwise_tolerance(n), Float64[], Bool[], spill_path, nothing, nothing, 0)
     if matrix.overflow
         _split_fall_back!(refined, "an entry is outside the Float32 range")
         return refined
@@ -505,12 +653,14 @@ host and is skipped; a stall falls back to a host `ComplexF64` LU.
 """
 function SplitRefinedLU(matrix::SplitDenseMatrix, device_solve::Function, release_device::Function)
     all(isfinite, matrix.hi) || throw(ArgumentError("dense coupled matrix has non-finite entries"))
-    spill_directory = _dense_spill_target(size(matrix, 1))
+    n = size(matrix, 1)                  # before a spill empties `matrix.hi` (size reads it)
+    spill_directory = _dense_spill_target(n)
     matrix_norm = _split_opnorm_inf(matrix.hi, matrix)
     store, spill_path = isnothing(spill_directory) ? (matrix.hi, nothing) : _split_spill(matrix.hi, spill_directory)
     isnothing(spill_path) || (matrix.hi = Matrix{ComplexF32}(undef, 0, 0))
-    return SplitRefinedLU(matrix, store, matrix_norm, nothing, nothing, 0, 0, nothing, NaN, Float64[], Bool[],
-                          spill_path, device_solve, release_device)
+    return SplitRefinedLU(matrix, store, matrix_norm, nothing, nothing, 0, 0, nothing, NaN, NaN,
+                          _split_componentwise_tolerance(n), Float64[], Bool[],
+                          spill_path, device_solve, release_device, 0)
 end
 
 """Free a device-held factor (no-op for host factors)."""
@@ -534,9 +684,10 @@ function _split_fall_back!(factorization::SplitRefinedLU, reason::AbstractString
     return factorization
 end
 
-function _split_residual!(residual, factorization::SplitRefinedLU, target, solution)
+function _split_residual!(residual, factorization::SplitRefinedLU, target, solution; absolute=nothing)
     copyto!(residual, target)
-    _split_mul!(residual, factorization.store, factorization.matrix, solution, -one(ComplexF64), one(ComplexF64))
+    _split_mul!(residual, factorization.store, factorization.matrix, solution, -one(ComplexF64), one(ComplexF64);
+                absolute)
     return residual
 end
 
@@ -544,6 +695,22 @@ function _split_backward_error_ratios(factorization::SplitRefinedLU, residual, s
     threshold = factorization.matrix_norm * eps(Float64) * sqrt(size(factorization.store, 1))
     return [norm(view(residual, :, column), Inf) /
             max(norm(view(solution, :, column), Inf) * threshold, floatmin(Float64)) for column in axes(solution, 2)]
+end
+
+"""
+    _split_acceptance!(residual, factorization, target, solution) -> (ratios, normwise)
+
+Recomputes the residual (and `|A| |x|` in the same pass when the componentwise test is on) and
+returns per column the combined acceptance ratio (≤ 1: accepted) and the normwise ratio alone.
+Records the worst componentwise backward error in the factorization.
+"""
+function _split_acceptance!(residual, factorization::SplitRefinedLU, target, solution)
+    absolute = isnan(factorization.componentwise_tolerance) ? nothing : Matrix{Float64}(undef, size(solution))
+    _split_residual!(residual, factorization, target, solution; absolute)
+    normwise = _split_backward_error_ratios(factorization, residual, solution)
+    ratios, componentwise = _acceptance_ratios(normwise, residual, absolute, target, factorization.componentwise_tolerance)
+    factorization.componentwise_backward_error = isempty(componentwise) ? NaN : maximum(componentwise)
+    return ratios, normwise
 end
 
 function _split_precondition(factorization::SplitRefinedLU, x::AbstractVecOrMat)
@@ -615,19 +782,20 @@ function _split_solve_columns!(factorization::SplitRefinedLU, target::Matrix{Com
         previous = Inf
         reason = nothing
         for iteration in 0:SPLIT_REFINEMENT_MAX_ITERATIONS
-            ratios = _split_backward_error_ratios(factorization, _split_residual!(residual, factorization, target, solution), solution)
+            ratios, normwise = _split_acceptance!(residual, factorization, target, solution)
             ratio = maximum(ratios; init=0.0)
-            if !isfinite(ratio)
+            if !all(isfinite, normwise) || isnan(ratio)
                 reason = "non-finite residual after $iteration refinement steps"
                 break
             end
             if ratio <= 1
-                factorization.backward_error = ratio
+                factorization.backward_error = maximum(normwise; init=0.0)
                 return solution
             end
             iteration == SPLIT_REFINEMENT_MAX_ITERATIONS && break
             if ratio > previous / 2
-                reason = "refinement stalled at $(ratio)x the Float64 backward error after $iteration steps"
+                reason = "refinement stalled at $(ratio)x the Float64 backward error after $iteration steps" *
+                         _componentwise_note(factorization)
                 break
             end
             previous = ratio
@@ -635,7 +803,8 @@ function _split_solve_columns!(factorization::SplitRefinedLU, target::Matrix{Com
             factorization.iterations = max(factorization.iterations, iteration + 1)
         end
         isnothing(reason) &&
-            (reason = "refinement did not reach the Float64 backward error in $(SPLIT_REFINEMENT_MAX_ITERATIONS) steps")
+            (reason = "refinement did not reach the Float64 backward error in $(SPLIT_REFINEMENT_MAX_ITERATIONS) steps" *
+                      _componentwise_note(factorization))
         if _dense_gmres_ir_enabled() && factorization.device_solve === nothing
             accepted, gmres_reason = _split_gmres_ir!(factorization, target, solution, residual)
             accepted && return solution
@@ -643,31 +812,33 @@ function _split_solve_columns!(factorization::SplitRefinedLU, target::Matrix{Com
         end
         _split_fall_back!(factorization, reason)
     end
-    solution = factorization.fallback \ target
-    _split_residual!(residual, factorization, target, solution)
-    factorization.backward_error = maximum(_split_backward_error_ratios(factorization, residual, solution); init=0.0)
+    solution, normwise = _refine_fallback!(x -> _split_acceptance!(residual, factorization, target, x),
+                                           factorization.fallback, factorization.fallback \ target, residual, factorization)
+    factorization.backward_error = maximum(normwise; init=0.0)
     return solution
 end
+
+_componentwise_note(factorization) = isnan(factorization.componentwise_tolerance) ? "" :
+    " (componentwise backward error $(factorization.componentwise_backward_error), tolerance $(factorization.componentwise_tolerance))"
 
 """
     _split_gmres_ir!(factorization, target, solution, residual) -> (accepted, reason)
 
 Restarted, right-preconditioned GMRES on `M y = r` for all columns in lockstep (one streamed
 product per Arnoldi step serves every column), `ComplexF64` Arnoldi, the `ComplexF32` LU factors
-applied in `ComplexF64` as preconditioner (`_split_precondition_double`). After each cycle the true residual is recomputed and the same backward-error test
+applied in `ComplexF64` as preconditioner (`_split_precondition_double`). After each cycle the true residual is recomputed and the same acceptance test (normwise and componentwise)
 as the refinement decides. `solution` is updated in place.
 """
 function _split_gmres_ir!(factorization::SplitRefinedLU, target, solution, residual)
     n, columns = size(target)
     m = DENSE_GMRES_IR_RESTART
     for cycle in 1:DENSE_GMRES_IR_MAX_CYCLES
-        _split_residual!(residual, factorization, target, solution)
-        ratios = _split_backward_error_ratios(factorization, residual, solution)
+        ratios, normwise = _split_acceptance!(residual, factorization, target, solution)
         # NaN does not compare greater than one: check before an empty active set
         # can be mistaken for convergence after a non-finite Float32 solve.
-        all(isfinite, ratios) || return false, "non-finite residual"
+        (all(isfinite, normwise) && !any(isnan, ratios)) || return false, "non-finite residual"
         active = findall(>(1), ratios)
-        isempty(active) && (factorization.backward_error = maximum(ratios; init=0.0); return true, "")
+        isempty(active) && (factorization.backward_error = maximum(normwise; init=0.0); return true, "")
         k = length(active)
         basis = Array{ComplexF64}(undef, n, m + 1, k)
         hessenberg = zeros(ComplexF64, m + 1, m, k)
@@ -704,11 +875,10 @@ function _split_gmres_ir!(factorization::SplitRefinedLU, target, solution, resid
             @views solution[:, column] .+= vec(_split_precondition_double(factorization, reshape(correction, :, 1)))
         end
     end
-    _split_residual!(residual, factorization, target, solution)
-    ratios = _split_backward_error_ratios(factorization, residual, solution)
-    maximum(ratios; init=0.0) <= 1 && (factorization.backward_error = maximum(ratios); return true, "")
+    ratios, normwise = _split_acceptance!(residual, factorization, target, solution)
+    maximum(ratios; init=0.0) <= 1 && (factorization.backward_error = maximum(normwise); return true, "")
     return false, "not converged after $(DENSE_GMRES_IR_MAX_CYCLES) restarts of $(DENSE_GMRES_IR_RESTART) " *
-                  "(worst $(maximum(ratios))x the Float64 backward error)"
+                  "(worst $(maximum(ratios))x the Float64 backward error)" * _componentwise_note(factorization)
 end
 
 # ---------------------------------------------------------------------------------------------
