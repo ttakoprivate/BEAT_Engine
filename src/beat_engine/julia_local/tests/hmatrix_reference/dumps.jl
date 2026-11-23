@@ -82,6 +82,8 @@ function test_dump_contract()
         @test ok
         @test occursin("verified Float64 dump", report)
         @test occursin("rest and rhs taken from the checked dump", report)
+        # Preserve the known missed assembly error; an improved estimator should
+        # fail this regression so its changed behaviour is reviewed explicitly.
         @test occursin(r"mech true 2.5e-01 est 0.0e\+00", report)
     end
 end

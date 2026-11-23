@@ -122,7 +122,9 @@ function test_blocks_and_krylov()
                     err
                 end
                 @test isdefined(BeatEngineFmm, :FmmNotConvergedError) && failure isa BeatEngineFmm.FmmNotConvergedError
-                if !isnothing(failure) && hasproperty(failure, :columns)
+                @test hasproperty(failure, :columns)
+                @test hasproperty(failure, :residuals)
+                if hasproperty(failure, :columns) && hasproperty(failure, :residuals)
                     @test failure.columns == [2] && only(failure.residuals) > 1e-10
                 end
                 answer = make_solver(150) \ b

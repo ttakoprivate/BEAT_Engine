@@ -48,7 +48,8 @@ function coupled_at(fem, bem, mapping, driver, radiator, frequency, tol, near)
         alpha = -0.97 * reference[1].bem_pressure[node] / reference[2].bem_pressure[node]
         @test abs(reference[1].bem_pressure[node] + alpha*reference[2].bem_pressure[node]) ≈
               0.03 * abs(reference[1].bem_pressure[node]) rtol=1e-12
-        limit = 1e-3
+        # Fixture regression gate, not the acceptance threshold for real models.
+        limit = 1e-4
         for field in (:fem_pressure, :bem_pressure, :interface_flux, :bem_neumann, :diaphragm_velocity, :voice_coil_current)
             r1, r2 = (getproperty(x, field) for x in reference)
             h1, h2 = (getproperty(x, field) for x in result)
