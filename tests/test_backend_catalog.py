@@ -1,11 +1,14 @@
 import json
+import os
 import subprocess
 import sys
 import tomllib
 from dataclasses import FrozenInstanceError
+from pathlib import Path
 
 import pytest
 
+import beat_engine
 from beat_engine import BackendInfo, backend_catalog, backend_info, engine_paths
 
 
@@ -58,7 +61,12 @@ from beat_engine.__main__ import main
 sys.argv = ['beat-engine', 'backends']
 main()
 """
-    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+    # The child must import the same beat_engine as this test, also without
+    # `pip install -e .` (pytest's `pythonpath` setting does not reach it).
+    package_root = str(Path(beat_engine.__file__).resolve().parents[1])
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, [package_root, env.get("PYTHONPATH")]))
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True, env=env)
     assert [item["backend_id"] for item in json.loads(result.stdout)] == [i.backend_id for i in backend_catalog()]
 
 
