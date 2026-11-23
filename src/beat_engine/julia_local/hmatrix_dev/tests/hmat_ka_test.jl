@@ -2,10 +2,12 @@
 # accuracy vs the CPU Float64 oracle on sample blocks, and throughput.
 # usage (from the work dir with src/ and tests/):  julia ... hmat_ka_test.jl <mesh prefix> <f> <backend: cpu|metal|cuda>
 include(joinpath(pwd(), "tests", "fmm_solve_probe.jl"))
-include(joinpath(@__DIR__, "..", "hmat_core.jl"))
+# repository layout: hmatrix_dev/tests/ next to hmatrix_dev/*.jl; Mac kit layout: all files in one folder
+const HMAT_DIR = isfile(joinpath(@__DIR__, "hmat_core.jl")) ? (@__DIR__) : joinpath(@__DIR__, "..")
+include(joinpath(HMAT_DIR, "hmat_core.jl"))
 using SparseArrays, Printf, StaticArrays, LinearAlgebra, Random
 const BC = BeatEngineCore
-include(joinpath(@__DIR__, "..", "hmat_fast.jl")); include(joinpath(@__DIR__, "..", "hmat_ka.jl"))
+include(joinpath(HMAT_DIR, "hmat_fast.jl")); include(joinpath(HMAT_DIR, "hmat_ka.jl"))
 backend = length(ARGS) > 2 ? ARGS[3] : "cpu"
 todev = identity; T = Float64
 if backend == "metal"

@@ -40,7 +40,7 @@ index 34ab05e..ceaa0dc 100644
  using ..BeatEngineCore
  using ..BeatEngineCoupled
  
-@@ -2663,6 +2694,32 @@ function build_condensed_coupled_system(
+@@ -2663,6 +2694,33 @@ function build_condensed_coupled_system(
      end
      block_assembly_s = (time_ns() - block_assembly_started) / 1.0e9
  
@@ -68,18 +68,23 @@ index 34ab05e..ceaa0dc 100644
 +            identity_p1_dp0=SparseMatrixCSC{ComplexF64,Int}(condensed_cache.base.identity_p1_dp0),
 +            bem_lhs_rows=ComplexF64.(coupled[bem_range[1:nr], bem_range]),
 +            bem_iface_rows=ComplexF64.(coupled[bem_range[1:nr], flux_range]),
++            assembly_eltype=string(eltype(coupled)), model_scalar_type=string(T), bem_backend=string(bem_backend),
 +        )
 +    end
      coupled_factorization_started = time_ns()
      if coupled isa SplitDenseMatrix
          # A, -C and any prefetched copies are consumed: free them before the factor is allocated.
-@@ -2936,6 +2993,12 @@ function solve_condensed_coupled_excitations(system, excitations; reconstruct_in
+@@ -2936,6 +2994,16 @@ function solve_condensed_coupled_excitations(system, excitations; reconstruct_in
              Complex{system.dense_scalar_type}.(transpose(system.condensation.force_solution) * interior_rhs)
      end
      dense_solution = _split_timed!(() -> system.factorization \ rhs, solve_split, :dense_solve)
 +    if !isempty(get(ENV, "BLAB_HMAT_DUMP", "")) && _HMAT_DUMP[] !== nothing
 +        dir = joinpath(ENV["BLAB_HMAT_DUMP"], "f$(round(Int, _HMAT_DUMP[].frequency_hz))Hz")
-+        _hmat_save(dir, merge(_HMAT_DUMP[], (rhs=ComplexF64.(rhs), dense_solution=ComplexF64.(dense_solution))))
++        # the arrays are written as ComplexF64; the original precisions are kept as metadata
++        _hmat_save(dir, merge(_HMAT_DUMP[], (rhs=ComplexF64.(rhs), dense_solution=ComplexF64.(dense_solution),
++                                             solution_eltype=string(eltype(dense_solution)),
++                                             solver_scalar_type=string(system.dense_scalar_type),
++                                             dense_solver=string(get(_dense_solver_diagnostics(system), "dense_solver", "unknown")))))
 +        println(stderr, "BLAB_HMAT_DUMP: wrote $dir")
 +        _HMAT_DUMP[] = nothing
 +    end

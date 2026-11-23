@@ -167,9 +167,10 @@ mutable struct ACAState
     phase::Symbol      # :row, :col, :done
     steps::Int
     hasnear::Bool      # block contains near-correction or identity entries (needs the exact fixup)
+    scale::Float64     # power of two from the first non-zero row (0: not set); U is unscaled at the end
 end
 ACAState(I, J, hn = true) = ACAState(I, J, Vector{ComplexF64}[], Vector{ComplexF64}[], falses(length(I)), 1, 0, 0.0,
-                          ComplexF64[], 0im, :row, 0, hn)
+                          ComplexF64[], 0im, :row, 0, hn, 0.0)
 
 # exact entries for a list of (i, j) from device regular parts + exact near entries + weights + identity
 function _finish_entries!(vals::AbstractVector{ComplexF64}, EI, EJ, nearEx::SparseMatrixCSC, o, need = nothing)
@@ -217,6 +218,11 @@ function aca_batched(states::Vector{ACAState}, entries, tol::Float64)
             tdev += @elapsed vals = entries(EI, EJ, need)
             Threads.@threads for t in eachindex(rowS)
                 s = rowS[t]; r = vals[off[t]+1:off[t+1]]
+                if iszero(s.scale)                       # same scaling as `aca`
+                    mx = maximum(abs, r; init=0.0)
+                    (iszero(mx) || !isfinite(mx)) || (s.scale = exp2(exponent(mx)))
+                end
+                iszero(s.scale) || (r ./= s.scale)
                 for q in eachindex(s.U); r .-= s.U[q][s.i] .* conj.(s.V[q]); end
                 s.usedr[s.i] = true
                 j = argmax(abs.(r)); piv = r[j]
@@ -236,21 +242,29 @@ function aca_batched(states::Vector{ACAState}, entries, tol::Float64)
             for s in colS; jj = s.J[s.j]; for i in s.I; push!(EI, i); push!(EJ, jj); push!(need, s.hasnear); end; push!(off, length(EI)); end
             tdev += @elapsed vals = entries(EI, EJ, need)
             Threads.@threads for t in eachindex(colS)
-                s = colS[t]; c = vals[off[t]+1:off[t+1]]
+                s = colS[t]; c = vals[off[t]+1:off[t+1]] ./ s.scale
                 for q in eachindex(s.U); c .-= conj(s.V[q][s.j]) .* s.U[q]; end
+                mc = maximum(abs, c; init=0.0)              # dynamic rescale, as in `aca`
+                if isfinite(mc) && !iszero(mc) && abs(exponent(mc)) > 100
+                    g = exp2(exponent(mc)); s.scale *= g; c ./= g; s.norm2 /= g^2
+                    for q in eachindex(s.U); s.U[q] ./= g; end
+                end
                 v = conj.(s.r ./ s.piv)
                 cross = 0.0 + 0im
                 for q in eachindex(s.U); cross += dot(s.U[q], c) * dot(v, s.V[q]); end
                 nu2 = sum(abs2, c) * sum(abs2, v)
                 s.norm2 += nu2 + 2real(cross)
                 push!(s.U, c); push!(s.V, v); s.steps += 1
-                if sqrt(nu2) <= tol * sqrt(max(s.norm2, eps())) || s.steps >= min(length(s.I), length(s.J))
+                if sqrt(nu2) <= tol * sqrt(max(s.norm2, nu2)) || s.steps >= min(length(s.I), length(s.J))
                     s.phase = :done; continue
                 end
                 a = abs.(c); a[s.usedr] .= -1; i = argmax(a)
                 if a[i] < 0; s.phase = :done; else; s.i = i; s.phase = :row; end
             end
         end
+    end
+    for s in states                               # unscale U
+        iszero(s.scale) || isone(s.scale) || foreach(u -> (u .*= s.scale), s.U)
     end
     return rounds, tdev
 end

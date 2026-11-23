@@ -36,9 +36,18 @@ end
 """ACA with partial pivoting. row(i) -> entries of row I[i] over J, col(j) -> column J[j] over I."""
 function aca(row, col, m::Int, n::Int, tol::Float64; maxrank::Int=min(m, n))
     U = Vector{Vector{ComplexF64}}(); V = Vector{Vector{ComplexF64}}()
-    usedr = falses(m); i = 1; norm2 = 0.0
-    for _ in 1:maxrank
+    usedr = falses(m); i = 1; norm2 = 0.0; visits = 0; scale = 0.0
+    # only accepted rank-1 terms count against maxrank; an empty pivot row just moves on
+    while length(U) < maxrank && visits < m
+        visits += 1
         r = Vector{ComplexF64}(row(i))
+        # work on entries scaled by a power of two set from the first non-zero row, so the squared norms
+        # neither under- nor overflow for very small or large blocks; U is unscaled on return
+        if iszero(scale)
+            mx = maximum(abs, r; init=0.0)
+            (iszero(mx) || !isfinite(mx)) || (scale = exp2(exponent(mx)))
+        end
+        iszero(scale) || (r ./= scale)
         for t in eachindex(U); r .-= U[t][i] .* conj.(V[t]); end
         usedr[i] = true
         j = argmax(abs.(r)); piv = r[j]
@@ -46,8 +55,15 @@ function aca(row, col, m::Int, n::Int, tol::Float64; maxrank::Int=min(m, n))
             free = findall(!, usedr); isempty(free) && break
             i = free[1]; continue
         end
-        c = Vector{ComplexF64}(col(j))
+        c = Vector{ComplexF64}(col(j)) ./ scale
         for t in eachindex(U); c .-= conj(V[t][j]) .* U[t]; end
+        # rescale dynamically (power of two, exact) when the new column is far from O(1): the first row can
+        # be tiny compared with the rest of the block (review: [2^-520 0; 1 1] overflowed the squared norm)
+        mc = maximum(abs, c; init=0.0)
+        if isfinite(mc) && !iszero(mc) && abs(exponent(mc)) > 100
+            g = exp2(exponent(mc)); scale *= g; c ./= g; norm2 /= g^2
+            for t in eachindex(U); U[t] ./= g; end
+        end
         v = conj.(r ./ piv)
         # update ||S||^2 incrementally
         cross = 0.0 + 0im
@@ -55,12 +71,13 @@ function aca(row, col, m::Int, n::Int, tol::Float64; maxrank::Int=min(m, n))
         nu2 = sum(abs2, c) * sum(abs2, v)
         norm2 += nu2 + 2real(cross)
         push!(U, c); push!(V, v)
-        sqrt(nu2) <= tol * sqrt(max(norm2, eps())) && break
+        # relative stop; no absolute floor, so a block of tiny entries keeps the same relative accuracy
+        sqrt(nu2) <= tol * sqrt(max(norm2, nu2)) && break
         a = abs.(c); a[usedr] .= -1; i = argmax(a)
         a[i] < 0 && break
     end
     k = length(U)
-    Um = k == 0 ? zeros(ComplexF64, m, 0) : reduce(hcat, U)
+    Um = k == 0 ? zeros(ComplexF64, m, 0) : reduce(hcat, U) .* scale
     Vm = k == 0 ? zeros(ComplexF64, n, 0) : reduce(hcat, V)
     return Um, Vm
 end

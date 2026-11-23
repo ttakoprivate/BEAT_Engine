@@ -1,8 +1,10 @@
 include(joinpath(pwd(), "tests", "fmm_solve_probe.jl"))
-include(joinpath(@__DIR__, "..", "hmat_core.jl"))
+# repository layout: hmatrix_dev/tests/ next to hmatrix_dev/*.jl; Mac kit layout: all files in one folder
+const HMAT_DIR = isfile(joinpath(@__DIR__, "hmat_core.jl")) ? (@__DIR__) : joinpath(@__DIR__, "..")
+include(joinpath(HMAT_DIR, "hmat_core.jl"))
 using SparseArrays, Serialization, Printf, StaticArrays, LinearAlgebra
 const BC = BeatEngineCore
-include(joinpath(@__DIR__, "..", "hmat_fast.jl"))
+include(joinpath(HMAT_DIR, "hmat_fast.jl"))
 mesh = load_txt_mesh(ARGS[1]); f = parse(Float64, ARGS[2]); tol = parse(Float64, ARGS[3]); k = 2pi * f / 343
 check = length(ARGS) > 3
 p1 = build_p1_space(mesh); dp0 = build_dp0_space(mesh); rule = triangle_rule(Float64, 2)
@@ -41,7 +43,7 @@ gpu = get(ENV, "HMAT_GPU", "")
 if gpu == ""
     tb = @elapsed H = hbuild_threaded(o, root, (a, b) -> adm(a, b, 1.0), tol, n)
 else
-    include(joinpath(@__DIR__, "..", "hmat_ka.jl"))
+    include(joinpath(HMAT_DIR, "hmat_ka.jl"))
     if gpu == "metal"; @eval using Metal; todev = MtlArray; Tg = Float32
     elseif gpu == "cuda"; @eval using CUDA; todev = CuArray; Tg = Float32
     elseif gpu == "cuda64"; @eval using CUDA; todev = CuArray; Tg = Float64

@@ -5,8 +5,10 @@ include(joinpath(pwd(), "src", "BeatEngineCoupled.jl"))
 include(joinpath(pwd(), "src", "BeatEngineFmm.jl")); using .BeatEngineFmm
 using Krylov, LinearMaps, Random, SparseArrays, Printf, StaticArrays, LinearAlgebra, Serialization
 const BC = BeatEngineCore
-include(joinpath(@__DIR__, "hmat_core.jl")); include(joinpath(@__DIR__, "hmat_fast.jl"))
-include(joinpath(@__DIR__, "hmat_ka.jl")); include(joinpath(@__DIR__, "hmat_c.jl"))
+# repository layout: hmatrix_dev/tests/ next to hmatrix_dev/*.jl; Mac kit layout: all files in one folder
+const HMAT_DIR = isfile(joinpath(@__DIR__, "hmat_core.jl")) ? (@__DIR__) : joinpath(@__DIR__, "..")
+include(joinpath(HMAT_DIR, "hmat_core.jl")); include(joinpath(HMAT_DIR, "hmat_fast.jl"))
+include(joinpath(HMAT_DIR, "hmat_ka.jl")); include(joinpath(HMAT_DIR, "hmat_c.jl"))
 function hmat_load(dir)
     vals = Pair{Symbol,Any}[]
     rd(name, T, dims) = (a = Array{T}(undef, dims...); read!(joinpath(dir, name * ".bin"), a); a)
@@ -128,11 +130,113 @@ end
 # ---- a-posteriori error estimate prototype (env HMAT_TRUTH_DIR = Float64 dump of the same frequency) ----
 # estimate: residual of the dumped solution against the independent H operator, one correction solve
 # M_H d = r (loose tolerance / few iterations), d ~ x_true - x_dumped. Compared with the real error vs Float64.
+# Scope: only the BEM operator rows (A and C) are re-evaluated independently (H operator, Float64 near
+# entries). `rest` (FEM, interface, transducer rows) and the right-hand side come from the dump being
+# checked, so errors in those blocks are NOT seen by this estimate.
+# A verified reference must be a full Float64 run of the same physical model: Float64 model data,
+# CPU (Float64) BEM assembly, Float64 dense matrix and factor. The model fingerprint compares the BEM
+# mesh (topology and tags exactly, coordinates up to Float32 rounding), the non-BEM-operator part of the
+# system (FEM, interface, transducer rows: coil resistance etc.), the interface operator (sizes must
+# match), the driver coupling operator bem_motion_flux (sizes must match), the wavenumber (medium, up to Float32 rounding; NaN/Inf rejected), the regular and singular
+# quadrature orders and the symmetry mode (exactly); the right-hand sides are compared per excitation (explicit zero handling).
+function check_truth(truth, d)
+    meta(x, key) = hasproperty(x, key) ? string(getproperty(x, key)) : "missing"
+    unchecked = get(ENV, "HMAT_TRUTH_UNCHECKED", "0") == "1"
+    problems = String[]; discretisation = String[]
+    for (key, want) in ((:model_scalar_type, "Float64"), (:bem_backend, "cpu"), (:assembly_eltype, "ComplexF64"),
+                        (:solver_scalar_type, "Float64"), (:solution_eltype, "ComplexF64"))
+        meta(truth, key) == want || push!(problems, "truth $key = $(meta(truth, key)) ($want required)")
+    end
+    startswith(meta(truth, :dense_solver), "lu_float64") ||
+        push!(problems, "truth dense_solver = $(meta(truth, :dense_solver)) (a Float64 LU required)")
+    truth.frequency_hz == d.frequency_hz || push!(problems, "frequency $(truth.frequency_hz) vs $(d.frequency_hz)")
+    # wavenumber = what the BEM operator is built with: catches a different sound speed (medium) at the same
+    # frequency; tolerance allows only the Float32 rounding of the same input (k = 2*pi*f/c)
+    kt, kd = Float64(truth.wavenumber), Float64(d.wavenumber)
+    if !(isfinite(kt) && kt > 0 && isfinite(kd) && kd > 0)   # NaN/Inf would pass the tolerance test below
+        push!(problems, "wavenumber $(kt) vs $(kd) (positive finite values required)")
+    elseif abs(kt - kd) > 8 * eps(Float32) * max(abs(kt), abs(kd))
+        push!(problems, "wavenumber $(kt) vs $(kd) (different sound speed/medium?)")
+    end
+    # discretisation: the independent operator is built with the checked dump's quadrature orders and
+    # symmetry, so a reference with other settings is a different discrete problem (a deliberate
+    # quadrature study must be labelled as such: HMAT_TRUTH_DISCRETISATION_STUDY=1)
+    study = get(ENV, "HMAT_TRUTH_DISCRETISATION_STUDY", "0") == "1"
+    for key in (:regular_quadrature_order, :singular_order, :symmetry_mode)
+        mt_, md_ = meta(truth, key), meta(d, key)
+        (mt_ == md_ && mt_ != "missing") && continue
+        msg = "$key $(mt_) vs $(md_)"
+        study ? push!(discretisation, msg) : push!(problems, msg * " (different discretisation; HMAT_TRUTH_DISCRETISATION_STUDY=1 for a quadrature comparison)")
+    end
+    reldiff(a, b) = (na = max(norm(a), norm(b)); iszero(na) ? 0.0 : norm(a - b) / na)
+    # geometry: same BEM topology and tags exactly; coordinates equal up to Float32 rounding of the same input
+    mt, md = truth.bem_mesh, d.bem_mesh
+    if length(mt.vertices) != length(md.vertices) || mt.faces != md.faces || mt.physical_tags != md.physical_tags
+        push!(problems, "BEM mesh topology/tags differ ($(length(mt.vertices)) vs $(length(md.vertices)) vertices)")
+    else
+        extent = maximum(v -> maximum(abs, v), mt.vertices)
+        shift = maximum(i -> maximum(abs, mt.vertices[i] - md.vertices[i]), eachindex(mt.vertices))
+        shift > 8 * eps(Float32) * extent &&
+            push!(problems, "BEM mesh coordinates differ by up to $(shift) (more than Float32 rounding)")
+    end
+    if size(truth.rest) != size(d.rest)
+        push!(problems, "system size $(size(truth.rest)) vs $(size(d.rest))")
+    else
+        (m = reldiff(truth.rest, d.rest)) > 1e-4 && push!(problems, "model fingerprint: non-BEM system part differs by $(m) (different transducer/FEM data?)")
+        if size(truth.bem_flux) != size(d.bem_flux)
+            push!(problems, "interface operator size $(size(truth.bem_flux)) vs $(size(d.bem_flux))")
+        elseif (m = reldiff(truth.bem_flux, d.bem_flux)) > 1e-4
+            push!(problems, "interface operator differs by $(m)")
+        end
+    end
+    # membrane-motion (driver) coupling operator, stored separately from rest/bem_flux (review of f9485da:
+    # a reversed driver sign changed rest by only 7e-5 but this operator by 2). No driver = nothing/missing,
+    # equivalent only to an operator without columns.
+    motion(x) = (hasproperty(x, :bem_motion_flux) && x.bem_motion_flux !== nothing) ? x.bem_motion_flux : nothing
+    gt, gd = motion(truth), motion(d)
+    if gt === nothing || gd === nothing
+        other = gt === nothing ? gd : gt
+        (other === nothing || size(other, 2) == 0) ||
+            push!(problems, "driver coupling operator present in one dump only ($(size(other)))")
+    elseif size(gt) != size(gd)
+        push!(problems, "driver coupling operator size $(size(gt)) vs $(size(gd))")
+    elseif !(all(isfinite, gt) && all(isfinite, gd))
+        push!(problems, "driver coupling operator has non-finite entries")
+    elseif (m = reldiff(gt, gd)) > 1e-4
+        push!(problems, "driver coupling operator differs by $(m) (different driver/sign?)")
+    end
+    if size(truth.rhs) != size(d.rhs)
+        push!(problems, "rhs size $(size(truth.rhs)) vs $(size(d.rhs))")
+    else
+        for c in axes(d.rhs, 2)
+            bt = truth.rhs[:, c]; bd = d.rhs[:, c]
+            iszero(bt) != iszero(bd) && (push!(problems, "excitation $c: zero in one dump only"); continue)
+            (m = reldiff(bt, bd)) > 1e-4 && push!(problems, "excitation $c: right-hand side differs by $(m) (order or model?)")
+        end
+    end
+    if !isempty(problems)
+        unchecked || error("HMAT_TRUTH_DIR is not a usable Float64 reference: " * join(problems, "; ") *
+                           " (set HMAT_TRUTH_UNCHECKED=1 to compare anyway)")
+        println("   WARNING (HMAT_TRUTH_UNCHECKED=1): ", join(problems, "; "))
+    end
+    unchecked && !isempty(problems) && return "UNCHECKED reference"
+    if !isempty(discretisation)
+        println("   DISCRETISATION STUDY (HMAT_TRUTH_DISCRETISATION_STUDY=1): ", join(discretisation, "; "))
+        return "Float64 discretisation-study reference (" * join(discretisation, "; ") * ")"
+    end
+    return "verified Float64 dump"
+end
+
 if haskey(ENV, "HMAT_TRUTH_DIR")
-    tr = hmat_load(ENV["HMAT_TRUTH_DIR"]).dense_solution
-    ec < ep && (tr = conj.(tr))   # same convention as d (conjugated above when ec < ep)
+    truth = hmat_load(ENV["HMAT_TRUTH_DIR"])
+    ec < ep && (truth = merge(truth, (rhs=conj.(truth.rhs), dense_solution=conj.(truth.dense_solution),
+                                      rest=conj.(truth.rest), bem_flux=conj.(truth.bem_flux),
+                                      bem_motion_flux=truth.bem_motion_flux === nothing ? nothing : conj.(truth.bem_motion_flux))))  # as d above
+    label = check_truth(truth, d)
+    tr = truth.dense_solution
     nexc = min(size(d.rhs, 2), parse(Int, get(ENV, "HMAT_EST_NEXC", "6")))
-    println("\n== a-posteriori estimate vs true error (truth: Float64 dump)")
+    println("\n== a-posteriori estimate vs true error (truth: $label)")
+    println("   scope: residual of A, C re-evaluated (H operator); rest and rhs taken from the checked dump")
     for its in (3, 15), c in 1:nexc
         b = d.rhs[:, c]; xs = d.dense_solution[:, c]; xt = tr[:, c]
         r = b - hmul_coupled(xs)
@@ -143,6 +247,36 @@ if haskey(ENV, "HMAT_TRUTH_DIR")
             e_true = maximum(abs.(xt[rr] - xs[rr])) / maximum(abs.(xt[rr])); e_est = maximum(abs.(dl[rr])) / maximum(abs.(xs[rr]))
             mis = norm(dl[rr] - (xt[rr] - xs[rr])) / max(norm(xt[rr] - xs[rr]), eps())
             @printf(" %s true %.1e est %.1e (shape miss %.2f)", name, e_true, e_est, mis)
+        end
+        println()
+    end
+end
+
+# ---- row-sampling assembly indicator prototype (env HMAT_ROWSAMPLE=1) ----
+# Cheap alternative to the full H residual: only the s dumped BEM rows are re-evaluated exactly (Float64),
+# Δr_s = (A64 - A_engine)[rows, :] x. Full residual norm extrapolated as sqrt(nB/s) |Δr_s|; the error is
+# propagated with the amplification of the solver on a random vector of that norm.
+# Compared with the full H residual (all rows) and with the true error vs the Float64 dump.
+if get(ENV, "HMAT_ROWSAMPLE", "0") == "1"
+    s = length(r)
+    Iq = d.bem_iface_rows   # engine interface rows (already conjugated above when needed)
+    Ar = d.bem_lhs_rows
+    ec < ep && (Ar = conj.(Ar))
+    Ex = ec < ep ? E : E      # exact rows in the oracle convention (d is converted to it above)
+    rng = MersenneTwister(5)
+    println("\n== row-sampling assembly indicator (s = $s of $nB BEM rows)")
+    for c in 1:min(size(d.rhs, 2), parse(Int, get(ENV, "HMAT_EST_NEXC", "4")))
+        xs = d.dense_solution[:, c]; b = d.rhs[:, c]
+        dr_s = (Ex - Ar) * xs[B] .+ (Cq - Iq) * xs[Q]
+        rfull = b - hmul_coupled(xs)                              # full residual vs the H operator
+        est_norm = sqrt(nB / s) * norm(dr_s)
+        z = randn(rng, ComplexF64, n); z[setdiff(1:n, B)] .= 0; z .*= est_norm / norm(z)
+        dz, _ = gmres(Am, D * z; N=Pm, ldiv=false, rtol=1e-3, atol=0.0, memory=100, itmax=15)
+        df, _ = gmres(Am, D * rfull; N=Pm, ldiv=false, rtol=1e-3, atol=0.0, memory=100, itmax=15)
+        @printf("   exc %d: |Δr| sampled-extrapolated %.2e vs full-H %.2e (BEM rows %.2e);", c, est_norm, norm(rfull), norm(rfull[B]))
+        if haskey(ENV, "HMAT_TRUTH_DIR")
+            e = tr[:, c] - xs
+            @printf(" error rel: true %.1e, full-H correction %.1e, random-direction %.1e", norm(e) / norm(tr[:, c]), norm(df) / norm(xs), norm(dz) / norm(xs))
         end
         println()
     end

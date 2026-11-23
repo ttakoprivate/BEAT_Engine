@@ -1,10 +1,12 @@
 # H-matrix of the BM right-hand operator -C (all faces as columns): build on the device, check against direct/FMM products.
 # usage: julia ... hmat_c_test.jl <mesh prefix> <f> <tol> <backend: cpu|cpu32|metal|cuda>
 include(joinpath(pwd(), "tests", "fmm_solve_probe.jl"))
-include(joinpath(@__DIR__, "..", "hmat_core.jl"))
+# repository layout: hmatrix_dev/tests/ next to hmatrix_dev/*.jl; Mac kit layout: all files in one folder
+const HMAT_DIR = isfile(joinpath(@__DIR__, "hmat_core.jl")) ? (@__DIR__) : joinpath(@__DIR__, "..")
+include(joinpath(HMAT_DIR, "hmat_core.jl"))
 using SparseArrays, Printf, StaticArrays, LinearAlgebra, Random
 const BC = BeatEngineCore
-include(joinpath(@__DIR__, "..", "hmat_fast.jl")); include(joinpath(@__DIR__, "..", "hmat_ka.jl")); include(joinpath(@__DIR__, "..", "hmat_c.jl"))
+include(joinpath(HMAT_DIR, "hmat_fast.jl")); include(joinpath(HMAT_DIR, "hmat_ka.jl")); include(joinpath(HMAT_DIR, "hmat_c.jl"))
 backend = ARGS[4]; todev = identity; T = backend in ("cpu", "cuda64") ? Float64 : Float32
 if backend == "metal"; @eval using Metal; todev = MtlArray
 elseif backend in ("cuda", "cuda64"); @eval using CUDA; todev = CuArray; end

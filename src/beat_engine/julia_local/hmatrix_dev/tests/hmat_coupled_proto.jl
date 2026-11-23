@@ -6,8 +6,10 @@ include(joinpath(pwd(), "tests", "coupled_condensed_test_setup.jl"))
 include(joinpath(pwd(), "src", "BeatEngineFmm.jl")); using .BeatEngineFmm
 using Krylov, LinearMaps, Random, SparseArrays, Printf, StaticArrays, LinearAlgebra
 const BC = BeatEngineCore
-include(joinpath(@__DIR__, "..", "hmat_core.jl")); include(joinpath(@__DIR__, "..", "hmat_fast.jl"))
-include(joinpath(@__DIR__, "..", "hmat_ka.jl")); include(joinpath(@__DIR__, "..", "hmat_c.jl"))
+# repository layout: hmatrix_dev/tests/ next to hmatrix_dev/*.jl; Mac kit layout: all files in one folder
+const HMAT_DIR = isfile(joinpath(@__DIR__, "hmat_core.jl")) ? (@__DIR__) : joinpath(@__DIR__, "..")
+include(joinpath(HMAT_DIR, "hmat_core.jl")); include(joinpath(HMAT_DIR, "hmat_fast.jl"))
+include(joinpath(HMAT_DIR, "hmat_ka.jl")); include(joinpath(HMAT_DIR, "hmat_c.jl"))
 gpu = get(ENV, "HMAT_GPU", "cpu"); todev = identity; Tg = gpu == "cpu" ? Float64 : Float32
 gpu == "metal" && (@eval using Metal; todev = MtlArray); gpu == "cuda" && (@eval using CUDA; todev = CuArray)
 tol = parse(Float64, get(ENV, "HMAT_TOL", "1e-4"))

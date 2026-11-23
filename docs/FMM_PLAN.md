@@ -443,11 +443,61 @@ Reference: CPU beat_cpu with `solver_options.precision=float64`. Float32: Metal 
 | 20, dump run (`interface_elimination=none`, no refinement step) | 0.039 / 0.161 / 7.74 | 3.2e-3 | 3.3e-4 | 3.9e-7 |
 
 Correction of the earlier note: the 1-2 % / 12-16 % boundary errors and the multi-dB null errors belong to the
-unrefined Float32 path used for the H-matrix dumps, not to the normal fork run. With the default split refinement the
-Float32 result matches Float64 to about 1e-4 relative (deep nulls <= 0.08 dB) over 10-20 kHz on this model. The
-reported `dense_refinement_backward_error` was 5.9e-4 (10 kHz) and 1.8e-4 (20 kHz).
+dump runs (`BLAB_COUPLED_DENSE_SPLIT=off`, both interface eliminations off, interface radiation off), not to the
+normal fork run. With the default split refinement the Float32 result matches Float64 to about 1e-4 relative
+(deep nulls <= 0.08 dB) over 10-20 kHz on this model.
 
-Consequence for the error indicator: the refinement step already has the ingredients of an a-posteriori estimate
-(Float64 residual + one correction). The size of that correction, mapped through the output operators, bounds the
-error of the unrefined iterate; for the refined result it is a conservative upper bound. Next: log the correction
-norm per output, and compare it with the true error on the dumps (unrefined x32 vs f64).
+**Cause of the dump-run error (found 2026-11-22 with the solver error estimate of PR #2):** not the Float32
+assembly. `RefinedDenseLU` accepted the first Float32 LU solution with 0 refinement steps, because its
+backward-error test is normwise (ratio 0.455 <= 1), while the forward error was 0.9-13 % per excitation. The new
+estimate (Mac, Metal, same settings, 20 kHz, 20 excitations, all marked reliable) against the true error of the
+same configuration vs Float64 (max |err| / max |ref|, dominated by the flux unknowns q):
+
+| excitation | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
+|---|---|---|---|---|---|---|---|
+| true | 9.2e-3 | 1.0e-2 | 1.3e-1 | 1.2e-2 | 7.2e-2 | 4.8e-2 | 1.1e-1 |
+| estimate | 9.2e-3 | 1.0e-2 | 1.26e-1 | 1.17e-2 | 7.25e-2 | 4.81e-2 | 1.15e-1 |
+
+In the default split path the estimate is 1e-9 .. 5e-9 (10 and 20 kHz), while the result differs from the full
+Float64 run by ~3e-5 .. 7e-5: that remainder is Float32 assembly / Float32 storage of the dense block, which the
+solver estimate does not see by design. Follow-ups: (a) let the refinement continue while the estimate is above
+a tolerance (a numerical change: separate PR, issue #6); (b) an assembly indicator (issue #4). A naive row
+sampling was tried on the dump (the first 64 BEM rows, A and C only, no right-hand side, residual norm
+extrapolated, error propagated along a random direction): it underestimated the residual by ~300x and the error
+by ~30x. Issue #4 proposes the sound version (random full rows with known inclusion probabilities, all blocks
+including the right-hand side, adjoint solve for outputs); not tested yet. The full Float64 residual against the H operator
+plus one correction (section below) does work; it costs one H build per checked frequency.
+
+## Review of 3190c88 (ChatGPT agent, 2026-11-21) and fixes (branch claude/hmatrix-review-fixes)
+
+1. **Dump checker estimate scope.** The residual re-evaluates only the BEM operator rows (A, C) through the
+   H operator; `rest` (FEM, interface, transducer rows) and the right-hand side are taken from the dump being
+   checked. Errors in those blocks are not seen (reviewer's 2x2 transducer block example: estimate 0, true 25 %).
+   The checker now prints this scope. In the 20 kHz dump the residual against the H operator lies mostly
+   outside the BEM rows (3.5e-7 total vs 5e-8 on BEM rows); the estimate still matched the true error there
+   because `rest` and the right-hand side are exact in Float64 in that dump and the error came from the solver
+   acceptance (see above), not from those blocks.
+2. **`near_factor` below the element size counted adjacent pairs twice** (Duffy added for all adjacent pairs,
+   regular value removed only inside the radius search; 17 % / 46 % boundary-pressure error at 0.25). Fixed:
+   the regular value of every adjacent pair is removed in the `cache.pairs` loop. Regression test in
+   `tests/fmm_operator_tests.jl` (fails before, passes after).
+3. **ACA stop was absolute for tiny blocks** (`eps()` floor on the squared norm; s = 1e-16 diagonal block lost a
+   rank). Now relative only, in `aca` and `aca_batched`; entries are scaled by a power of two from the first
+   non-zero row and rescaled dynamically when a new column is far from O(1), so the squared norms do not
+   under-/overflow (1e-170, 1e160 and a 2^-520 first row in an O(1) block tested).
+4. **An empty start row consumed the rank budget in scalar ACA.** Only accepted rank-1 terms count now.
+   Tests for 3 and 4: `hmatrix_dev/tests/hmat_aca_test.jl` (scalar and batched).
+5. **`FmmCoupledSolve \ b` returned an unconverged GMRES iterate.** It now throws `FmmNotConvergedError`
+   (failed columns, residuals, iterates). Test in `tests/fmm_operator_tests.jl`.
+6. **A Float32 dump could pass as Float64 truth.** The dump hook records `model_scalar_type`, `bem_backend`,
+   `assembly_eltype`, `solution_eltype`, `solver_scalar_type` and `dense_solver`. A verified reference must be
+   a full Float64 run (Float64 model, CPU BEM assembly, Float64 matrix and LU). The checker also compares a
+   model fingerprint (BEM mesh topology and tags exactly and coordinates up to Float32 rounding; the
+   non-BEM-operator system part, e.g. coil resistance; the interface operator, sizes included) and
+   the right-hand side per excitation with explicit zero handling (second review: 6 vs 12 Ohm and swapped weak
+   excitations had passed). `HMAT_TRUTH_UNCHECKED=1` overrides, e.g. for dumps written before this change.
+7. The checker and tests include the H files from `hmatrix_dev/` in the repository layout and from their own
+   folder in the flat Mac-kit layout.
+
+CPU re-run of `hmat_coupled_proto.jl` (2 kHz fixture, tol 1e-4): 24 GMRES iterations, BEM p 1.6e-6,
+q 7.4e-6, mech 2.0e-8, elec 5.4e-10 vs dense (same as the reviewer's numbers).
