@@ -223,13 +223,15 @@ mutable struct RefinedDenseLU
     componentwise_tolerance::Float64        # NaN when BLAB_COUPLED_DENSE_COMPONENTWISE=0
     estimated_error::Vector{Float64}   # per column of the last solve (see _dense_error_estimate)
     estimate_direction_check::Vector{Bool}
+    error_bound::Matrix{Float64}       # componentwise solver-error bound of the last solve
+    output_estimates::Union{Nothing,Dict{Symbol,Matrix{Float64}}}   # set by the coupled solve
     fallback_refinement_steps::Int     # most Float64 refinement steps after the fallback (any solve)
 end
 
 function RefinedDenseLU(matrix::Matrix{ComplexF64})
     all(isfinite, matrix) || throw(ArgumentError("dense coupled matrix has non-finite entries"))
     tolerance = _dense_componentwise_enabled() ? _dense_componentwise_tolerance(size(matrix, 1)) : NaN
-    refined = RefinedDenseLU(matrix, opnorm(matrix, Inf), nothing, nothing, 0, nothing, NaN, NaN, tolerance, Float64[], Bool[], 0)
+    refined = RefinedDenseLU(matrix, opnorm(matrix, Inf), nothing, nothing, 0, nothing, NaN, NaN, tolerance, Float64[], Bool[], zeros(0, 0), nothing, 0)
     if maximum(abs, matrix; init=0.0) > floatmax(Float32)
         _dense_fall_back!(refined, "an entry is outside the Float32 range")
     else
@@ -284,16 +286,18 @@ function Base.:\(factorization::RefinedDenseLU, rhs::AbstractVecOrMat)
     target = ComplexF64.(rhs)
     residual = similar(target)
     solution = _refined_solve!(factorization, target, residual)
+    factorization.output_estimates = nothing
     if _dense_error_estimate_enabled()     # `residual` is the final residual on every exit
         apply = isnothing(factorization.fallback) ? (r -> ComplexF64.(factorization.factor \ ComplexF32.(r))) :
                                                     (r -> factorization.fallback \ r)
         multiply = y -> factorization.matrix * y
-        factorization.estimated_error, factorization.estimate_direction_check =
+        factorization.estimated_error, factorization.estimate_direction_check, factorization.error_bound =
             _dense_error_estimate(apply, multiply, solution isa AbstractVector ? reshape(solution, :, 1) : solution,
                                   residual isa AbstractVector ? reshape(residual, :, 1) : residual,
                                   target isa AbstractVector ? reshape(target, :, 1) : target)
     else
         factorization.estimated_error, factorization.estimate_direction_check = Float64[], Bool[]
+        factorization.error_bound = zeros(0, 0)
     end
     return solution
 end
@@ -339,7 +343,7 @@ end
 # shared with the CUDA coupled path.
 using ..BeatEngineCoupled: SplitDenseMatrix, adopt_square_storage, SplitRefinedLU, SplitGMRES, _dense_solver_mode, release_split_factor!, _dense_split_enabled,
     _dense_spill_target, _dense_gmres_ir_enabled, _split_mul!, _split_opnorm_inf, _split_materialize,
-    _split_precondition_double, _dense_error_estimate_enabled, _dense_error_estimate,
+    _split_precondition_double, _dense_error_estimate_enabled, _dense_error_estimate, _output_error_bound,
     _dense_componentwise_enabled, _dense_componentwise_tolerance, _dense_abs_product, _acceptance_ratios,
     _componentwise_backward_errors, _refine_fallback!,
     _componentwise_note
@@ -361,10 +365,91 @@ For the refined solvers (and after a `SplitGMRES` fallback) also `dense_estimate
 an a-posteriori estimate of the solver's relative error for the assembled system (not discretization
 or assembly error) and a heuristic check of it, see `_dense_error_estimate`.
 `BLAB_DENSE_ERROR_ESTIMATE=0` skips it.
+
+After a coupled solve also, per transducer output and excitation (step 2 of docs/ROADMAP.md, display
+only): `dense_output_estimated_relative_error_diaphragm_velocity` / `..._voice_coil_current`
+(estimated complex relative solver error, `nothing` = unknown), `dense_output_recompute_float64_*`
+and `dense_output_recompute_float64` (hint: recompute in Float64), `dense_output_error_hint_threshold`.
+Solver error and output rounding only, not the Float32 assembly error; releases nothing.
 """
 function dense_solver_diagnostics(system)
     diagnostics = _dense_solver_diagnostics(system)
+    merge!(diagnostics, _output_estimate_diagnostics(system))
     hasproperty(system, :dense_lhs_adopted) && (diagnostics["dense_lhs_adopted"] = system.dense_lhs_adopted)
+    return diagnostics
+end
+
+# Step 2 of docs/ROADMAP.md (display only): estimated complex relative solver error per output and
+# excitation for the outputs read directly from the dense solution (diaphragm velocity and voice-coil
+# current per transducer), from the componentwise bound of `_dense_error_estimate`, and the hint to
+# recompute in Float64 where it exceeds `BLAB_OUTPUT_ERROR_HINT` (default 1e-3, provisional until the
+# owner sets the threshold) or is unknown. The estimate is a complex error, so a phase flip at equal
+# level counts fully. Solver error for the assembled system only: the Float32 assembly error (step 4)
+# is not included, so nothing is released automatically on this basis.
+
+function _output_error_hint_threshold()
+    raw = strip(get(ENV, "BLAB_OUTPUT_ERROR_HINT", ""))
+    isempty(raw) && return 1.0e-3
+    value = tryparse(Float64, raw)
+    (isnothing(value) || !(value > 0) || !isfinite(value)) &&
+        throw(ArgumentError("BLAB_OUTPUT_ERROR_HINT must be a positive finite number, got $(repr(raw))"))
+    return value
+end
+
+"""
+    output_recompute_hint(estimate, threshold) -> Bool
+
+`true` (recompute in Float64) when the estimated complex relative error exceeds `threshold` or is
+unknown (`NaN`) or infinite.
+"""
+output_recompute_hint(estimate::Real, threshold::Real) = !(isfinite(estimate) && estimate <= threshold)
+
+"""
+    output_error_estimates(factorization, dense_solution, ranges) -> Union{Nothing,Dict}
+
+Per output in `ranges` (`field => rows of the dense solution`) a `rows × excitations` matrix of the
+estimated complex relative solver error, or `nothing` when the solver gives no componentwise bound.
+"""
+function output_error_estimates(factorization, dense_solution::AbstractMatrix, ranges)
+    source = factorization isa SplitGMRES ? factorization.fallback : factorization
+    (isnothing(source) || !hasproperty(source, :error_bound)) && return nothing
+    bound = source.error_bound
+    size(bound) == size(dense_solution) || return nothing
+    return Dict(field => reduce(hcat, [_output_error_bound(view(bound, :, j), view(dense_solution, :, j), rows)
+                                       for j in axes(dense_solution, 2)]; init=zeros(length(rows), 0))
+                for (field, rows) in ranges)
+end
+
+function _store_output_estimates!(system, dense_solution)
+    factorization = system.factorization
+    store = factorization isa SplitGMRES ? factorization.fallback : factorization
+    (isnothing(store) || !hasproperty(store, :output_estimates)) && return nothing
+    ranges = (:diaphragm_velocity => system.mechanical_range, :voice_coil_current => system.electrical_range)
+    estimates = output_error_estimates(factorization, _as_matrix(dense_solution), ranges)
+    # the outputs are stored as Complex{scalar_type}: add the complex rounding √2 u of that storage
+    rounding = system.scalar_type === Float64 ? 0.0 : sqrt(2.0) * Float64(eps(system.scalar_type)) / 2
+    store.output_estimates = isnothing(estimates) ? nothing :
+                             Dict{Symbol,Matrix{Float64}}(field => m .+ rounding for (field, m) in estimates)
+    return nothing
+end
+
+function _output_estimate_diagnostics(system)
+    factorization = hasproperty(system, :factorization) ? system.factorization : nothing
+    store = factorization isa SplitGMRES ? factorization.fallback : factorization
+    (isnothing(store) || !hasproperty(store, :output_estimates)) && return Dict{String,Any}()
+    estimates = store.output_estimates
+    isnothing(estimates) && return Dict{String,Any}()
+    threshold = _output_error_hint_threshold()
+    as_json(m) = [Union{Nothing,Float64}[isnan(v) ? nothing : (isinf(v) ? floatmax(Float64) : v) for v in view(m, :, j)]
+                  for j in axes(m, 2)]
+    diagnostics = Dict{String,Any}("dense_output_error_hint_threshold" => threshold)
+    for (field, m) in estimates
+        diagnostics["dense_output_estimated_relative_error_$(field)"] = as_json(m)
+        diagnostics["dense_output_recompute_float64_$(field)"] =
+            [[output_recompute_hint(v, threshold) for v in view(m, :, j)] for j in axes(m, 2)]
+    end
+    diagnostics["dense_output_recompute_float64"] =
+        any(output_recompute_hint(v, threshold) for m in values(estimates) for v in m)
     return diagnostics
 end
 
@@ -3009,6 +3094,7 @@ function solve_condensed_coupled_excitations(system, excitations; reconstruct_in
             Complex{system.dense_scalar_type}.(transpose(system.condensation.force_solution) * interior_rhs)
     end
     dense_solution = _split_timed!(() -> system.factorization \ rhs, solve_split, :dense_solve)
+    _store_output_estimates!(system, dense_solution)
     solution = Complex{T}.(dense_solution)
     flux_reconstruction_started = time_ns()
     retained_pressure, interface_flux = if elimination_mode == :none
