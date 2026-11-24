@@ -169,7 +169,7 @@ def test_missing_profiles_preserves_old_worker_normal_fallback(ready, payload):
 
 
 @pytest.mark.parametrize("kind", ["interior_fem", "coupled_fem_bem_lem"])
-def test_rigid_ideal_source_rejects_interior_boundaries_before_submission(ready, payload, kind):
+def test_rigid_ideal_source_negotiates_fem_boundary_support(ready, payload, kind):
     system = payload["compiled_system"]
     system["contract_version"] = 2
     system["components"][0]["parameters"] = {"motion_profile": "rigid_translation", "motion_axis": [1, 2, 3]}
@@ -180,14 +180,21 @@ def test_rigid_ideal_source_rejects_interior_boundaries_before_submission(ready,
         interior.update(id="region:interior", kind="bounded_air")
         system["regions"].append(interior)
         system["boundaries"][0]["region_id"] = interior["id"]
-    with pytest.raises(WorkerCompatibilityError, match="exterior-only boundary assignments"):
-        negotiate_submission(ready, payload, "solve")
+    if kind == "interior_fem":
+        with pytest.raises(WorkerCompatibilityError, match="exterior or coupled"):
+            negotiate_submission(ready, payload, "solve")
+    else:
+        assert negotiate_submission(ready, payload, "solve")["result_schema_version"] == 2
+        ready.pop("coupled_source_profiles")
+        with pytest.raises(WorkerCompatibilityError, match="restart the worker"):
+            negotiate_submission(ready, payload, "solve")
 
 
 @pytest.mark.parametrize("profiles", [None, {}, "rigid_translation", [1], [""]])
-def test_rejects_malformed_coupled_source_profiles(ready, profiles):
-    ready["coupled_exterior_source_profiles"] = profiles
-    with pytest.raises(WorkerCompatibilityError, match="coupled_exterior_source_profiles"):
+@pytest.mark.parametrize("capability", ["coupled_exterior_source_profiles", "coupled_source_profiles"])
+def test_rejects_malformed_coupled_source_profiles(ready, profiles, capability):
+    ready[capability] = profiles
+    with pytest.raises(WorkerCompatibilityError, match=capability):
         validate_worker_ready(ready)
 
 
@@ -244,6 +251,7 @@ def test_rejects_unavailable_backend_without_fallback(ready, payload, backend, m
 
 
 def fake_worker(tmp_path, info):
+    """Stub worker; it echoes an explicitly requested phasor convention like the engine does."""
     script = tmp_path / "worker.py"
     received = tmp_path / "received.jsonl"
     script.write_text(
@@ -253,7 +261,11 @@ print(json.dumps({info!r}), flush=True)
 for line in sys.stdin:
     with pathlib.Path({str(received)!r}).open('a') as stream:
         stream.write(line)
-    print(json.dumps({{"type": "result", "result": {{"schema_version": 2}}}}), flush=True)
+    result = json.loads('{{"schema_version": 2}}')
+    phasor = json.loads(line).get("phasor_convention")
+    if phasor is not None:
+        result["diagnostics"] = {{"phasor_convention": phasor}}
+    print(json.dumps({{"type": "result", "result": result}}), flush=True)
     print(json.dumps({{"type": "completed"}}), flush=True)
 """,
         encoding="utf-8",
@@ -441,3 +453,137 @@ def test_invalid_exterior_kind_advertisement(ready, kinds):
 def test_missing_exterior_kinds_keeps_ideal_sources_compatible(ready, payload):
     ready.pop("exterior_component_kinds")
     assert negotiate_submission(ready, payload, "solve")["result_schema_version"] == 2
+
+
+def continuous_rom_payload(payload):
+    exterior_transducer_payload(payload)
+    payload["compiled_system"]["regions"].append(
+        {**copy.deepcopy(payload["compiled_system"]["regions"][0]), "id": "rom-air", "kind": "bounded_air"}
+    )
+    payload["solver_options"]["continuous_speaker_rom"] = {
+        "band_hz": [20.0, 250.0],
+        "max_rank": 64,
+        "max_training": 8,
+        "validation_count": 3,
+    }
+    payload["solver_options"]["phasor_convention"] = "exp(+i omega t)"
+    return payload
+
+
+def test_continuous_rom_requires_advertised_version(ready, payload):
+    continuous_rom_payload(payload)
+    assert negotiate_submission(ready, payload, "solve")["result_schema_version"] == 2
+    for versions in (None, [], [2]):
+        old = copy.deepcopy(ready)
+        if versions is None:
+            old.pop("continuous_speaker_rom_versions")
+        else:
+            old["continuous_speaker_rom_versions"] = versions
+        with pytest.raises(WorkerCompatibilityError, match="continuous_speaker_rom version 1"):
+            negotiate_submission(old, payload, "solve")
+
+
+def test_missing_rom_capability_keeps_ordinary_requests(ready, payload):
+    ready.pop("continuous_speaker_rom_versions")
+    assert negotiate_submission(ready, payload, "solve")["result_schema_version"] == 2
+
+
+@pytest.mark.parametrize("versions", [None, {}, "1", [True], [1.0], [0], [-1], [1, "2"]])
+def test_rejects_malformed_continuous_rom_announcements(ready, payload, versions):
+    ready["continuous_speaker_rom_versions"] = versions
+    with pytest.raises(WorkerCompatibilityError, match="continuous_speaker_rom_versions"):
+        validate_worker_ready(ready)
+    with pytest.raises(WorkerCompatibilityError, match="continuous_speaker_rom_versions"):
+        negotiate_submission(ready, continuous_rom_payload(copy.deepcopy(payload)), "solve")
+
+
+def test_unsupported_continuous_rom_request_never_reaches_worker(tmp_path, ready, payload):
+    old = copy.deepcopy(ready)
+    old.pop("continuous_speaker_rom_versions")
+    worker, received = fake_worker(tmp_path, old)
+    path = tmp_path / "payload.json"
+    path.write_text(json.dumps(continuous_rom_payload(copy.deepcopy(payload))))
+    try:
+        with pytest.raises(WorkerCompatibilityError, match="continuous_speaker_rom version 1"):
+            worker.submit(path)
+        assert not received.exists()
+        path.write_text(json.dumps(payload))
+        assert list(worker.submit(path))[-1]["type"] == "completed"
+    finally:
+        worker.terminate()
+
+
+def uncoupled_rom_payload(payload, kind):
+    payload["solver_options"]["continuous_speaker_rom"] = {
+        "band_hz": [20.0, 250.0],
+        "max_rank": 64,
+        "max_training": 8,
+        "validation_count": 3,
+    }
+    if kind == "interior_fem":
+        payload["compiled_system"]["regions"][0]["kind"] = "bounded_air"
+    return payload
+
+
+@pytest.mark.parametrize("kind", ["exterior_bem", "interior_fem"])
+def test_continuous_rom_requires_coupled_solve(ready, payload, kind):
+    assert 1 in ready["continuous_speaker_rom_versions"]
+    with pytest.raises(WorkerCompatibilityError, match=f"requires a coupled_fem_bem_lem solve, not '{kind}'"):
+        negotiate_submission(ready, uncoupled_rom_payload(payload, kind), "solve")
+
+
+@pytest.mark.parametrize("kind", ["exterior_bem", "interior_fem"])
+def test_uncoupled_continuous_rom_request_never_reaches_worker(tmp_path, ready, payload, kind):
+    worker, received = fake_worker(tmp_path, ready)
+    path = tmp_path / "payload.json"
+    path.write_text(json.dumps(uncoupled_rom_payload(copy.deepcopy(payload), kind)))
+    try:
+        with pytest.raises(WorkerCompatibilityError, match="requires a coupled_fem_bem_lem solve"):
+            worker.submit(path)
+        assert not received.exists()
+        path.write_text(json.dumps(continuous_rom_payload(copy.deepcopy(payload))))
+        assert list(worker.submit(path))[-1]["type"] == "completed"
+        command = json.loads(received.read_text())
+        assert command["operation"] == "solve"
+    finally:
+        worker.terminate()
+
+
+@pytest.mark.parametrize("convention", [None, "exp(-i omega t)"])
+def test_continuous_rom_requires_positive_phasor(ready, payload, convention):
+    assert "exp(-i omega t)" in ready["phasor_conventions"]
+    continuous_rom_payload(payload)
+    if convention is None:
+        payload["solver_options"].pop("phasor_convention")
+    else:
+        payload["solver_options"]["phasor_convention"] = convention
+    with pytest.raises(WorkerCompatibilityError, match=r"requires phasor convention 'exp\(\+i omega t\)'"):
+        negotiate_submission(ready, payload, "solve")
+
+
+def test_ordinary_requests_keep_negative_phasor_default(ready, payload):
+    command = negotiate_submission(ready, payload, "solve")
+    assert "phasor_convention" not in command
+    assert "phasor_convention" not in payload["solver_options"]
+
+
+@pytest.mark.parametrize("convention", [None, "exp(-i omega t)"])
+def test_negative_phasor_rom_request_never_reaches_worker(tmp_path, ready, payload, convention):
+    worker, received = fake_worker(tmp_path, ready)
+    rom = continuous_rom_payload(copy.deepcopy(payload))
+    if convention is None:
+        rom["solver_options"].pop("phasor_convention")
+    else:
+        rom["solver_options"]["phasor_convention"] = convention
+    path = tmp_path / "payload.json"
+    path.write_text(json.dumps(rom))
+    try:
+        with pytest.raises(WorkerCompatibilityError, match="requires phasor convention"):
+            worker.submit(path)
+        assert not received.exists()
+        path.write_text(json.dumps(continuous_rom_payload(copy.deepcopy(payload))))
+        assert list(worker.submit(path))[-1]["type"] == "completed"
+        command = json.loads(received.read_text())
+        assert command["phasor_convention"] == "exp(+i omega t)"
+    finally:
+        worker.terminate()

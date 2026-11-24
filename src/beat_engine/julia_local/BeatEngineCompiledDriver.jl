@@ -24,6 +24,8 @@ include(joinpath(@__DIR__, "src", "BeatEngineInterfaceRadiation.jl"))
 using .BeatEngineInterfaceRadiation
 include(joinpath(@__DIR__, "exterior_rhs_policy.jl"))
 
+include(joinpath(@__DIR__, "continuous_speaker_rom.jl"))
+
 const DEFAULT_TRANSDUCER_REFERENCE_VOLTAGE_V = 2.83
 const RUN_MESH_PROVENANCE = Ref{Any}([])
 const COMPILED_WORKER_LOAD = Ref{Any}(nothing)
@@ -723,6 +725,50 @@ function exterior_quadrature_selection(options, mesh::BoundaryMesh{T}, frequency
     return (order=order, mode=mode, mesh_stat=mesh_stat, area=area, length=element_length, kh=kh)
 end
 
+function prescribed_motion_axis(parameters, symmetry_mode, ::Type{T}) where {T<:AbstractFloat}
+    if haskey(parameters, "motion_profile") || haskey(parameters, "motion_axis")
+        unsupported = setdiff(Set(String.(keys(parameters))),
+            Set(("boundary_motion_weights", "motion_profile", "motion_axis")))
+        isempty(unsupported) || error(
+            "Prescribed velocity source has unsupported parameters: " * join(sort!(collect(unsupported)), ", "),
+        )
+    end
+    motion_profile = String(get(parameters, "motion_profile", "uniform_normal"))
+    motion_profile in ("uniform_normal", "rigid_translation") || error(
+        "Prescribed velocity source motion_profile must be uniform_normal or rigid_translation.",
+    )
+    motion_axis = if motion_profile == "rigid_translation"
+        raw_axis = get(parameters, "motion_axis", nothing)
+        raw_axis isa AbstractVector && length(raw_axis) == 3 || error(
+            "Rigid-translation source requires a three-component motion_axis.",
+        )
+        all(value -> value isa Real && !(value isa Bool) && isfinite(value), raw_axis) || error(
+            "Rigid-translation source motion_axis must contain three finite numbers.",
+        )
+        # An axis specifies direction, not speed. Normalize before converting
+        # to solve precision so finite large/tiny directions work in Float32.
+        axis = SVector{3,Float64}(Float64.(raw_axis))
+        axis_scale = maximum(abs, axis)
+        all(isfinite, axis) && axis_scale > 0.0 || error(
+            "Rigid-translation source motion_axis must be finite and nonzero.",
+        )
+        axis /= axis_scale
+        axis = SVector{3,T}(axis / norm(axis))
+        for (mode, coordinate) in ((:x, 1), (:y, 2), (:xy, 1), (:xy, 2))
+            symmetry_mode == mode && abs(axis[coordinate]) > T(1e-8) && error(
+                "Rigid-translation source motion_axis must lie in the physical symmetry planes.",
+            )
+        end
+        axis
+    else
+        haskey(parameters, "motion_axis") && error(
+            "motion_axis requires motion_profile=rigid_translation.",
+        )
+        nothing
+    end
+    return motion_axis
+end
+
 function exterior_excitations(ports, components, boundaries, boundary_tag_by_id, exterior_region, symmetry_mode, ::Type{T}) where {T<:AbstractFloat}
     excitations = NamedTuple[]
     for port_id in String.(ports)
@@ -743,39 +789,7 @@ function exterior_excitations(ports, components, boundaries, boundary_tag_by_id,
                 "Exterior ideal velocity source has unsupported parameters: " * join(sort!(collect(unsupported)), ", "),
             )
         end
-        motion_profile = String(get(parameters, "motion_profile", "uniform_normal"))
-        motion_profile in ("uniform_normal", "rigid_translation") || error(
-            "Exterior ideal velocity source motion_profile must be uniform_normal or rigid_translation.",
-        )
-        motion_axis = if motion_profile == "rigid_translation"
-            raw_axis = get(parameters, "motion_axis", nothing)
-            raw_axis isa AbstractVector && length(raw_axis) == 3 || error(
-                "Rigid-translation source requires a three-component motion_axis.",
-            )
-            all(value -> value isa Real && !(value isa Bool) && isfinite(value), raw_axis) || error(
-                "Rigid-translation source motion_axis must contain three finite numbers.",
-            )
-            # An axis specifies direction, not speed. Normalize before converting
-            # to solve precision so finite large/tiny directions work in Float32.
-            axis = SVector{3,Float64}(Float64.(raw_axis))
-            axis_scale = maximum(abs, axis)
-            all(isfinite, axis) && axis_scale > 0.0 || error(
-                "Rigid-translation source motion_axis must be finite and nonzero.",
-            )
-            axis /= axis_scale
-            axis = SVector{3,T}(axis / norm(axis))
-            for (mode, coordinate) in ((:x, 1), (:y, 2), (:xy, 1), (:xy, 2))
-                symmetry_mode == mode && abs(axis[coordinate]) > T(1e-8) && error(
-                    "Rigid-translation source motion_axis must lie in the physical symmetry planes.",
-                )
-            end
-            axis
-        else
-            haskey(parameters, "motion_axis") && error(
-                "motion_axis requires motion_profile=rigid_translation.",
-            )
-            nothing
-        end
+        motion_axis = prescribed_motion_axis(parameters, symmetry_mode, T)
         raw_weights = get(parameters, "boundary_motion_weights", Dict{String,Any}())
         raw_weights isa AbstractDict || error("boundary_motion_weights must be an object.")
         if explicit_motion
@@ -2726,7 +2740,7 @@ function solve_request_impl(request; event_mode=false)
 
     bounded_regions = [region for region in regions if String(region["kind"]) == "bounded_air"]
     unbounded_regions = [region for region in regions if String(region["kind"]) == "unbounded_air"]
-    if !isempty(bounded_regions)
+    if !isempty(bounded_regions) && isempty(unbounded_regions)
         for component in components
             String(component["kind"]) == "ideal_velocity_source" || continue
             parameters = component["parameters"]
@@ -2919,6 +2933,11 @@ function solve_request_impl(request; event_mode=false)
         if port_kind == "normal_velocity" && component_kind == "ideal_velocity_source"
             parameters = get(component, "parameters", Dict{String,Any}())
             raw_weights = get(parameters, "boundary_motion_weights", Dict{String,Any}())
+            raw_weights isa AbstractDict || error("boundary_motion_weights must be an object.")
+            if haskey(parameters, "motion_profile") || haskey(parameters, "motion_axis")
+                unrelated = setdiff(Set(String.(keys(raw_weights))), Set(String.(component["boundary_ids"])))
+                isempty(unrelated) || error("Prescribed boundary motion weights reference unrelated boundaries.")
+            end
             candidate_boundaries = [
                 object_by_id(boundaries, String(boundary_id), "boundary")
                 for boundary_id in component["boundary_ids"]
@@ -2962,14 +2981,7 @@ function solve_request_impl(request; event_mode=false)
                 "Prescribed-velocity component $(repr(String(component["id"]))) " *
                 "must own at least one moving FEM or BEM boundary.",
             )
-            axial_excitation = if get(parameters, "motion_profile", "uniform_normal") == "rigid_translation"
-                only(exterior_excitations(
-                    [port_id], (ports=ports, items=components), boundaries,
-                    bem_boundary_tag_by_id, unbounded_region, symmetry_mode, FloatType,
-                ))
-            else
-                nothing
-            end
+            motion_axis = prescribed_motion_axis(parameters, symmetry_mode, FloatType)
             bem_source_index = 0
             if !isempty(bem_boundary_tags)
                 prescribed_bem_count += 1
@@ -2984,8 +2996,8 @@ function solve_request_impl(request; event_mode=false)
                     weight == zero(FloatType) && continue
                     push!(prescribed_bem_rows, face_index)
                     push!(prescribed_bem_cols, bem_source_index)
-                    motion = axial_excitation === nothing ? weight :
-                        weight * exterior_motion_factor(axial_excitation, bem_mesh.normals[face_index], FloatType)
+                    motion = motion_axis === nothing ? weight :
+                        weight * dot(motion_axis, bem_mesh.normals[face_index])
                     push!(prescribed_bem_values, motion)
                 end
             end
@@ -2995,6 +3007,7 @@ function solve_request_impl(request; event_mode=false)
                     kind=:normal_velocity,
                     fem_boundary_tags=fem_boundary_tags,
                     fem_boundary_weights=fem_boundary_weights,
+                    motion_axis=motion_axis,
                     bem_source_index=bem_source_index,
                     transducer_index=0,
                     amplitude=Complex{FloatType}(1, 0),
@@ -3179,6 +3192,10 @@ function solve_request_impl(request; event_mode=false)
     try
         if metal_field_batch !== nothing
             metal_field_points = BeatEngineCore.prepare_metal_field_output_points(metal_field_batch.point_sets)
+        end
+        continuous_model = if haskey(solver_options, "continuous_speaker_rom")
+            println(stderr, "Training continuous Level 3 speaker ROM")
+            train_continuous_speaker(request, cancel_requested, bem_backend)
         end
         for (frequency_index, frequency_value) in enumerate(request["frequencies_hz"])
             if cancel_requested()
@@ -3891,6 +3908,10 @@ function solve_request_impl(request; event_mode=false)
                     sweep_pipeline_plan === nothing ? nothing : String(sweep_pipeline_plan.reason)
                 diagnostics["coupled_sweep_pipeline_saving_model_s"] =
                     sweep_pipeline_plan === nothing ? nothing : sweep_pipeline_plan.saving_model_s
+            end
+            if frequency_index == 1 && continuous_model !== nothing
+                diagnostics["continuous_speaker_rom"] = continuous_model
+                continuous_model = nothing
             end
             isnothing(rank_experiment) ||
                 (diagnostics["speaker_rom_rank_experiment"] = rank_experiment)

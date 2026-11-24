@@ -6,7 +6,7 @@
   },
   "engine": {
     "name": "BEAT Engine",
-    "version": "0.8.0"
+    "version": "0.9.0"
   },
   "contracts": {
     "system_request": [
@@ -45,6 +45,7 @@
     "uniform_normal",
     "rigid_translation"
   ],
+  "coupled_source_profiles": ["uniform_normal", "rigid_translation"],
   "coupled_exterior_source_profiles": [
     "uniform_normal",
     "rigid_translation"
@@ -63,6 +64,7 @@
     "exp(-i omega t)",
     "exp(+i omega t)"
   ],
+  "continuous_speaker_rom_versions": [1],
   "optional_output_quantities": [
     "interface_average_normal_velocity",
     "interface_radiated_pressure",

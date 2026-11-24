@@ -6,6 +6,7 @@ from . import SYSTEM_RESULT_VERSION, SYSTEM_SOLVE_REQUEST_VERSION, validate_solv
 
 WORKER_PROTOCOL_VERSION = 1
 FIELD_ARRAY_VERSION = 1
+CONTINUOUS_SPEAKER_ROM_VERSION = 1
 
 
 class WorkerCompatibilityError(RuntimeError):
@@ -56,7 +57,7 @@ def validate_worker_ready(info: dict) -> None:
             isinstance(kinds, list) and all(isinstance(kind, str) and bool(kind.strip()) for kind in kinds),
             "invalid exterior_component_kinds capabilities; expected a list of non-empty strings.",
         )
-    for name in ("exterior_source_profiles", "coupled_exterior_source_profiles"):
+    for name in ("exterior_source_profiles", "coupled_exterior_source_profiles", "coupled_source_profiles"):
         if name in info:
             profiles = info[name]
             _require(
@@ -71,6 +72,12 @@ def validate_worker_ready(info: dict) -> None:
                 isinstance(values, list) and all(isinstance(value, str) and bool(value.strip()) for value in values),
                 f"invalid {name} capabilities; expected a list of non-empty strings.",
             )
+    if "continuous_speaker_rom_versions" in info:
+        versions = info["continuous_speaker_rom_versions"]
+        _require(
+            isinstance(versions, list) and all(type(value) is int and value > 0 for value in versions),
+            "invalid continuous_speaker_rom_versions capabilities; expected a list of positive integers.",
+        )
     if "optional_output_quantities" in info:
         quantities = info["optional_output_quantities"]
         _require(
@@ -140,6 +147,27 @@ def negotiate_submission(info: dict, request: dict, operation: str) -> dict:
             else "coupled_fem_bem_lem"
         )
         _require(kind in info["solve_kinds"], f"solve kind {kind!r} is unavailable.")
+        if "continuous_speaker_rom" in options:
+            # The engine trains the ROM only on the coupled path; interior and exterior solves
+            # return earlier and would complete without it, as would older workers that ignore
+            # unknown solver options.
+            _require(
+                kind == "coupled_fem_bem_lem",
+                f"continuous_speaker_rom requires a coupled_fem_bem_lem solve, not {kind!r}.",
+            )
+            _require(
+                CONTINUOUS_SPEAKER_ROM_VERSION in info.get("continuous_speaker_rom_versions", []),
+                f"continuous_speaker_rom version {CONTINUOUS_SPEAKER_ROM_VERSION} is unavailable; "
+                "update BEAT Engine and restart the worker.",
+            )
+            # The ROM trainer accepts only exp(+i omega t); unlike ordinary solves it has no
+            # negative-phasor path, so the effective convention (including the default) is checked
+            # here instead of letting the worker abort after accepting the job.
+            rom_convention = options.get("phasor_convention", "exp(-i omega t)")
+            _require(
+                rom_convention == "exp(+i omega t)",
+                f"continuous_speaker_rom requires phasor convention 'exp(+i omega t)', not {rom_convention!r}.",
+            )
         for component in request["compiled_system"]["components"]:
             if kind == "exterior_bem":
                 _require(
@@ -153,16 +181,17 @@ def negotiate_submission(info: dict, request: dict, operation: str) -> dict:
                 system = request["compiled_system"]
                 exterior_ids = {region["id"] for region in system["regions"] if region["kind"] == "unbounded_air"}
                 boundaries = {boundary["id"]: boundary for boundary in system["boundaries"]}
+                exterior_only = bool(component["boundary_ids"]) and all(
+                    boundaries[boundary_id]["region_id"] in exterior_ids for boundary_id in component["boundary_ids"]
+                )
                 _require(
-                    bool(component["boundary_ids"])
-                    and all(
-                        boundaries[boundary_id]["region_id"] in exterior_ids
-                        for boundary_id in component["boundary_ids"]
-                    ),
-                    "rigid-translation ideal sources require exterior-only boundary assignments.",
+                    kind != "interior_fem",
+                    "rigid-translation ideal sources require exterior or coupled boundary assignments.",
                 )
                 capability = (
-                    "coupled_exterior_source_profiles" if kind == "coupled_fem_bem_lem" else "exterior_source_profiles"
+                    ("coupled_exterior_source_profiles" if exterior_only else "coupled_source_profiles")
+                    if kind == "coupled_fem_bem_lem"
+                    else "exterior_source_profiles"
                 )
                 _require(
                     profile in info.get(capability, ["uniform_normal"]),
