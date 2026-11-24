@@ -205,7 +205,10 @@ const DENSE_ESTIMATE_MAX_CONTRACTION = 0.5
 # products, worst case), and its effect ‖A⁻¹ δr‖_∞ <= ‖A⁻¹ diag(f)‖_∞ is estimated with the
 # Hager-Higham 1-norm estimator on the adjoint (LAPACK's FERR approach) using the factor M, times
 # DENSE_NORM_ESTIMATE_MARGIN for the estimator (a lower bound, normally within a factor 3) and
-# 1/(1-ρ) for M⁻¹ vs A⁻¹. This replaces the former fixed σ ‖d‖, which a residual rounded to (near)
+# 1/(1-ρ) for M⁻¹ vs A⁻¹. The margin is not a guarantee: a mode that none of the search directions
+# excites can be missed entirely (review of 25b7064: rank-one mode, estimate 1 vs norm 4.2e6, pinned
+# in output_error_estimate_tests.jl), so the bound and the hint stay heuristic and must not alone
+# release automatic decisions. This replaces the former fixed σ ‖d‖, which a residual rounded to (near)
 # zero defeats (review REVIEW-22-b5ea266, P1). Without an adjoint solve (device factor) the bound
 # is unknown.
 const DENSE_NORM_ESTIMATE_MARGIN = 3.0

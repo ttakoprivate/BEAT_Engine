@@ -205,3 +205,19 @@ end
     solver \ reshape(ComplexF64[1, 2], 2, 1)          # a new solve invalidates them
     @test !haskey(OE.dense_solver_diagnostics(system), "dense_output_recompute_float64")
 end
+
+@testset "REVIEW-22-25b7064: documented limit, the norm estimator can miss a large mode" begin
+    # Isolated estimator test from the review: a rank-one mode that none of the Hager-Higham search
+    # directions (uniform start, unit vectors, alternating vector) excites. The estimate is a lower
+    # bound and here ~4.2e6 times too small, so DENSE_NORM_ESTIMATE_MARGIN (3) is no guarantee and
+    # the per-output bound stays a heuristic. This test pins the known limitation; if the estimator
+    # is strengthened later it should be changed to require coverage.
+    v = ComplexF64[0, 1, 1, -1, -1, 0, 0, 0]
+    B = Matrix{ComplexF64}(I, 8, 8) + 2.0^20 * (v * v')
+    f = ones(8, 1)
+    estimate = OE.BeatEngineCoupled._inverse_scaled_norm(X -> B * X, X -> B' * X, f)[1]
+    exact = opnorm(B, Inf)
+    @test estimate <= exact * (1 + 1e-12)                      # still a lower bound
+    @test exact == 1 + 4 * 2.0^20
+    @test OE.BeatEngineCoupled.DENSE_NORM_ESTIMATE_MARGIN * estimate < exact / 1e6   # margin does not cover it
+end
