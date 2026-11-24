@@ -21,21 +21,21 @@
     22
   ],
   "lease": {
-    "holder": "work24-10-mwugtwxd",
-    "acquired_at": "2026-11-24T09:01:39.697Z",
-    "expires_at": "2026-11-24T10:31:39.697Z",
+    "holder": null,
+    "acquired_at": null,
+    "expires_at": null,
     "fencing_token": 9
   },
   "last_completed_run": {
-    "id": "work24-09-mwuep9u4",
-    "started_at": "2026-11-24T08:02:03.917Z",
-    "completed_at": "2026-11-24T08:05:10.168Z",
-    "status": "protocol_fix_verified_remaining_kind_gate_reproduced",
+    "id": "work24-10-mwugtwxd",
+    "started_at": "2026-11-24T09:01:39.697Z",
+    "completed_at": "2026-11-24T09:04:13.671Z",
+    "status": "rom_kind_fix_verified_phasor_gate_reproduced",
     "source_commit": "b34abee291207a13876068c99948d8ca386756fa",
     "checked_heads": {
       "9": "3d639cef853f6c60caa36fda4a8b39f28baec3f7",
       "14": "e9af918a436f93afdb630f06af539d08f45f46c8",
-      "19": "8ca7a299a86799ba458e312ffaca614549ab52d8",
+      "19": "f5fdb8a017b82799b193fb18c603bb3633509469",
       "hmatrix-dev": "353abae7a530bad0ddeac4be787f03109f7da846"
     },
     "source_changes": false,
@@ -43,15 +43,15 @@
     "actions": [
       {
         "pr": 19,
-        "commit": "8ca7a299a86799ba458e312ffaca614549ab52d8",
-        "review_id": 6035639354,
-        "url": "https://github.com/ttakoprivate/BEAT_Engine/pull/19#pullrequestreview-6035639354",
+        "commit": "f5fdb8a017b82799b193fb18c603bb3633509469",
+        "review_id": 6036353860,
+        "url": "https://github.com/ttakoprivate/BEAT_Engine/pull/19#pullrequestreview-6036353860",
         "review_state": "CHANGES_REQUESTED"
       }
     ],
-    "evidence": "Fresh clone/own venv. Python272 passed/1 Windows API skip and Ruff passed, exit0. Confirmed original ROM version fix with11 rejected cases and2 positive controls. Independently reproduced remaining existing P1: exterior and interior ROM requests accepted and sent to repository test stub (2 negotiation/2 transport cases). Julia early-return path source-inspected only, no numerical or GPU execution. Clean source tree; no Claude code modified.",
+    "evidence": "Fresh clone/own venv. Python276 passed/1 Windows API skip, Ruff passed, exit0. Two uncoupled-ROM transport guards and subsequent coupled recovery independently confirmed. Existing phasor P1 reproduced in Python: missing/negative phasor ROM commands accepted and sent to test stub, positive negotiation accepted. Julia positive-phasor requirement source-inspected only. First harness positive transport control failed due negative generic stub result; corrected scope to negotiation-only positive control and reran exit0. No source changes, Julia or GPU execution.",
     "pending": [
-      "PR19 author solve-kind gate fix and independent recheck. Other numerical/export review findings and owner decision on splitting remain open.",
+      "PR19 author effective positive-phasor gate fix and independent recheck. Numerical/export findings and owner decision on splitting remain open.",
       "PR14 independent review/h343 hardware checks await owner/Claude; issue12 awaits VACS sample/format answers.",
       "PR17 is merged; PR9 roadmap update planned by author."
     ],
