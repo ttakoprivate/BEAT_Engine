@@ -21,37 +21,37 @@
     22
   ],
   "lease": {
-    "holder": "work24-20-mwv29gxo",
-    "acquired_at": "2026-11-24T19:01:37.404Z",
-    "expires_at": "2026-11-24T20:31:37.404Z",
+    "holder": null,
+    "acquired_at": null,
+    "expires_at": null,
     "fencing_token": 17
   },
   "last_completed_run": {
-    "id": "work24-19-mwv03ixa",
-    "started_at": "2026-11-24T18:01:00.814Z",
-    "completed_at": "2026-11-24T18:08:49.623Z",
-    "status": "field_diagnostic_review_two_counterexamples",
+    "id": "work24-20-mwv29gxo",
+    "started_at": "2026-11-24T19:01:37.404Z",
+    "completed_at": "2026-11-24T19:08:50.683Z",
+    "status": "field_diagnostic_two_fixes_verified",
     "source_commit": "b34abee291207a13876068c99948d8ca386756fa",
     "checked_heads": {
       "9": "3d639cef853f6c60caa36fda4a8b39f28baec3f7",
       "14": "b2b756da7076cab3b32a63c822ec91af36a7e6ce",
       "19": "7afbaf4b3d88b1f15e39c12ab9a2a47473b336c9",
-      "22": "9abe18cb00e80528dd8fc283b255d85963314694"
+      "22": "d73eacc8eb21fa795377a2d808268b0348cd5179"
     },
     "source_changes": false,
     "tests_rerun": true,
     "actions": [
       {
         "pr": 22,
-        "commit": "9abe18cb00e80528dd8fc283b255d85963314694",
-        "review_id": 6044757445,
-        "url": "https://github.com/ttakoprivate/BEAT_Engine/pull/22#pullrequestreview-6044757445",
-        "review_state": "CHANGES_REQUESTED"
+        "commit": "d73eacc8eb21fa795377a2d808268b0348cd5179",
+        "review_id": 6045615700,
+        "url": "https://github.com/ttakoprivate/BEAT_Engine/pull/22#pullrequestreview-6045615700",
+        "review_state": "COMMENTED"
       }
     ],
-    "evidence": "Fresh isolated clone, official SHA256 verified Julia1.12.6 and own depot, instantiate exit0. Output tests368/368;8 algebra checks for none/pressure/dense-flux/block-flux;2 Float64 reconstruction cancellation checks;2 Float32 query-coordinate checks.380 successful assertions,no skips/Broken. Initial separate query harness exit1 due unqualified nonexported cache type; corrected qualified type rerun exit0. Flux synthetic W=1e20,x=1+eps64,h=1e20: stored16384 vs exactBigFloat22204.4604925,trueNeumannError5820.4604925,bound0.00552427,bothdense/block. Point single-source Float32 counterexample: field1335088.4,bound674287.08513,rounded-query-bound1335088.42886. Published REQUEST_CHANGES with repro/file-lines and scope limits. No project edits, no full reference/split/coupled/Python/GPU/performance run.",
+    "evidence": "Fresh isolated clone; new official SHA256 verified Julia1.12.6, own depot, instantiate exit0. Output tests375/375;18 own checks (16 flux reconstruction bounds/input nonmutation/unknown missing or wrong-shaped h, across dense/block and Float32/Float64;2 original near-point checks). Total393 passed,no skips/Broken,exit0. Original synthetic flux trueError5820.460492503131 now bound94205.55304529825 Float32,94205.54752102653 Float64,both paths. Original Float32 query now bound1335088.428860218 vs actual1335088.4. Source clean/no edits. Both specific repairs confirmed via COMMENT review; no general accuracy guarantee. No full reference gate, split/coupled/Python/independent physical reference/GPU/performance rerun.",
     "pending": [
-      "PR22 new field diagnostic9abe18c: two reproduced P2 findings await author: include Float64 flux reconstruction rounding before cancellation; align field-bound query precision with production Float32 kernel. Prior residual/GMRES fixes and norm-limit documentation remain confirmed, no general accuracy guarantee.",
+      "PR22 two prior field diagnostic findings fixed and independently verified atd73eacc. Diagnostic remains heuristic; h mass-solve error, field-kernel arithmetic, assembly and h343 hardware qualification remain outside this bounded verification.",
       "PR14 N1/N2 follow-upb2b756d awaits further independent review; row-quadrature/adjoint review and h343 qualification remain open.",
       "PR19 numerical/export findings and owner merge-splitting decision remain open; three ROM protocol fixes previously verified.",
       "Issue12 awaits VACS sample/format answers; PR17 merged; PR9 roadmap update planned by author."
