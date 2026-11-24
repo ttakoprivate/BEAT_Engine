@@ -505,3 +505,39 @@ def test_unsupported_continuous_rom_request_never_reaches_worker(tmp_path, ready
         assert list(worker.submit(path))[-1]["type"] == "completed"
     finally:
         worker.terminate()
+
+
+def uncoupled_rom_payload(payload, kind):
+    payload["solver_options"]["continuous_speaker_rom"] = {
+        "band_hz": [20.0, 250.0],
+        "max_rank": 64,
+        "max_training": 8,
+        "validation_count": 3,
+    }
+    if kind == "interior_fem":
+        payload["compiled_system"]["regions"][0]["kind"] = "bounded_air"
+    return payload
+
+
+@pytest.mark.parametrize("kind", ["exterior_bem", "interior_fem"])
+def test_continuous_rom_requires_coupled_solve(ready, payload, kind):
+    assert 1 in ready["continuous_speaker_rom_versions"]
+    with pytest.raises(WorkerCompatibilityError, match=f"requires a coupled_fem_bem_lem solve, not '{kind}'"):
+        negotiate_submission(ready, uncoupled_rom_payload(payload, kind), "solve")
+
+
+@pytest.mark.parametrize("kind", ["exterior_bem", "interior_fem"])
+def test_uncoupled_continuous_rom_request_never_reaches_worker(tmp_path, ready, payload, kind):
+    worker, received = fake_worker(tmp_path, ready)
+    path = tmp_path / "payload.json"
+    path.write_text(json.dumps(uncoupled_rom_payload(copy.deepcopy(payload), kind)))
+    try:
+        with pytest.raises(WorkerCompatibilityError, match="requires a coupled_fem_bem_lem solve"):
+            worker.submit(path)
+        assert not received.exists()
+        path.write_text(json.dumps(continuous_rom_payload(copy.deepcopy(payload))))
+        assert list(worker.submit(path))[-1]["type"] == "completed"
+        command = json.loads(received.read_text())
+        assert command["operation"] == "solve"
+    finally:
+        worker.terminate()

@@ -111,13 +111,6 @@ def negotiate_submission(info: dict, request: dict, operation: str) -> dict:
         ):
             _require(version in contracts[name], f"{name} version {version} is unavailable.")
         command["result_schema_version"] = SYSTEM_RESULT_VERSION
-        if "continuous_speaker_rom" in request["solver_options"]:
-            # Older workers ignore unknown solver options and would silently return no ROM.
-            _require(
-                CONTINUOUS_SPEAKER_ROM_VERSION in info.get("continuous_speaker_rom_versions", []),
-                f"continuous_speaker_rom version {CONTINUOUS_SPEAKER_ROM_VERSION} is unavailable; "
-                "update BEAT Engine and restart the worker.",
-            )
         if any(output["quantity"] == "interface_average_normal_velocity" for output in request["outputs"]):
             _require(
                 "interface_average_normal_velocity" in info.get("optional_output_quantities", []),
@@ -154,6 +147,19 @@ def negotiate_submission(info: dict, request: dict, operation: str) -> dict:
             else "coupled_fem_bem_lem"
         )
         _require(kind in info["solve_kinds"], f"solve kind {kind!r} is unavailable.")
+        if "continuous_speaker_rom" in options:
+            # The engine trains the ROM only on the coupled path; interior and exterior solves
+            # return earlier and would complete without it, as would older workers that ignore
+            # unknown solver options.
+            _require(
+                kind == "coupled_fem_bem_lem",
+                f"continuous_speaker_rom requires a coupled_fem_bem_lem solve, not {kind!r}.",
+            )
+            _require(
+                CONTINUOUS_SPEAKER_ROM_VERSION in info.get("continuous_speaker_rom_versions", []),
+                f"continuous_speaker_rom version {CONTINUOUS_SPEAKER_ROM_VERSION} is unavailable; "
+                "update BEAT Engine and restart the worker.",
+            )
         for component in request["compiled_system"]["components"]:
             if kind == "exterior_bem":
                 _require(
