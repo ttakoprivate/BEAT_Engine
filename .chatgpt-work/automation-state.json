@@ -21,40 +21,40 @@
     22
   ],
   "lease": {
-    "holder": "work24-19-mwv03ixa",
-    "acquired_at": "2026-11-24T18:01:00.814Z",
-    "expires_at": "2026-11-24T19:31:00.814Z",
+    "holder": null,
+    "acquired_at": null,
+    "expires_at": null,
     "fencing_token": 16
   },
   "last_completed_run": {
-    "id": "work24-17-mwuvwlhu",
-    "started_at": "2026-11-24T16:03:39.090Z",
-    "completed_at": "2026-11-24T16:09:09.861Z",
-    "status": "output_estimator_limit_documentation_verified",
+    "id": "work24-19-mwv03ixa",
+    "started_at": "2026-11-24T18:01:00.814Z",
+    "completed_at": "2026-11-24T18:08:49.623Z",
+    "status": "field_diagnostic_review_two_counterexamples",
     "source_commit": "b34abee291207a13876068c99948d8ca386756fa",
     "checked_heads": {
       "9": "3d639cef853f6c60caa36fda4a8b39f28baec3f7",
       "14": "b2b756da7076cab3b32a63c822ec91af36a7e6ce",
       "19": "7afbaf4b3d88b1f15e39c12ab9a2a47473b336c9",
-      "22": "2733dbaafd5bba5d8adc4f894fa1914ba01d610a"
+      "22": "9abe18cb00e80528dd8fc283b255d85963314694"
     },
     "source_changes": false,
     "tests_rerun": true,
     "actions": [
       {
         "pr": 22,
-        "commit": "2733dbaafd5bba5d8adc4f894fa1914ba01d610a",
-        "review_id": 6042930178,
-        "url": "https://github.com/ttakoprivate/BEAT_Engine/pull/22#pullrequestreview-6042930178",
-        "review_state": "COMMENTED"
+        "commit": "9abe18cb00e80528dd8fc283b255d85963314694",
+        "review_id": 6044757445,
+        "url": "https://github.com/ttakoprivate/BEAT_Engine/pull/22#pullrequestreview-6044757445",
+        "review_state": "CHANGES_REQUESTED"
       }
     ],
-    "evidence": "Fresh isolated clone; new official SHA256 verified Julia1.12.6 and own depot. Instantiate exit0; output_error_estimate_tests329/329,8 testsets,no skips/Broken,exit0. Added3 known-limit assertions pass; norm estimate1.0000000000110871 vs actual4194305 reproduced. Diff from25b7064 only source comment and16-line test; no executable solver changes. PR description updated to heuristic limit and explicit solve-count/path costs. Review confirms both previous requests fulfilled; no new issue. Clean source git checks exit0. No full reference gate, split suite, physical reference, Python or hardware/performance rerun.",
+    "evidence": "Fresh isolated clone, official SHA256 verified Julia1.12.6 and own depot, instantiate exit0. Output tests368/368;8 algebra checks for none/pressure/dense-flux/block-flux;2 Float64 reconstruction cancellation checks;2 Float32 query-coordinate checks.380 successful assertions,no skips/Broken. Initial separate query harness exit1 due unqualified nonexported cache type; corrected qualified type rerun exit0. Flux synthetic W=1e20,x=1+eps64,h=1e20: stored16384 vs exactBigFloat22204.4604925,trueNeumannError5820.4604925,bound0.00552427,bothdense/block. Point single-source Float32 counterexample: field1335088.4,bound674287.08513,rounded-query-bound1335088.42886. Published REQUEST_CHANGES with repro/file-lines and scope limits. No project edits, no full reference/split/coupled/Python/GPU/performance run.",
     "pending": [
-      "PR22 heuristic diagnostic only; field-point propagation, assembly-error coverage and h343 hardware qualification remain open. Previous documentation and known-limit test requests fulfilled at2733dba.",
+      "PR22 new field diagnostic9abe18c: two reproduced P2 findings await author: include Float64 flux reconstruction rounding before cancellation; align field-bound query precision with production Float32 kernel. Prior residual/GMRES fixes and norm-limit documentation remain confirmed, no general accuracy guarantee.",
       "PR14 N1/N2 follow-upb2b756d awaits further independent review; row-quadrature/adjoint review and h343 qualification remain open.",
       "PR19 numerical/export findings and owner merge-splitting decision remain open; three ROM protocol fixes previously verified.",
-      "Issue12 awaits VACS sample/format answers. PR17 merged; PR9 roadmap update planned by author."
+      "Issue12 awaits VACS sample/format answers; PR17 merged; PR9 roadmap update planned by author."
     ],
     "continuation": "Continue only new or independently actionable assigned work/reviews. Do not repeat unchanged findings, acknowledgments or owner questions. Normal external data/review/hardware waits do not pause automation."
   },
