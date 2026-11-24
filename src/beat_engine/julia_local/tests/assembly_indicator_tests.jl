@@ -98,3 +98,17 @@ end
         @test_throws ArgumentError sample_equations(MersenneTwister(0), 4, (1:4,), (budget,))
     end
 end
+
+@testset "Projection inputs are vectors" begin
+    sample = (rows=collect(1:4), probability=fill(0.5,4), groups=[1:4])
+    dual = ones(ComplexF64,4)
+    residual = ComplexF64[1,2,3,4]
+    extended = merge(sample, (rows=collect(5:8),))
+    @test_throws ArgumentError AIE.project_output(extended, reshape(ComplexF64.(1:8),2,4), ones(4), 0)
+    @test_throws ArgumentError AIE.project_output(sample, reshape(dual,2,2), residual, 0)
+    @test_throws ArgumentError AIE.project_output(sample, dual, reshape(residual,1,4), 0)
+    # The internal adjoint call uses a column view, not an owning Vector.
+    @test AIE.project_output(sample, view(reshape(dual,4,1),:,1), residual, 0).delta == 20
+    singleton = sample_equations(MersenneTwister(1),5,(1:5,),(1,))
+    @test isinf(AIE.project_output(singleton,ones(5),[1],0).stderr)
+end

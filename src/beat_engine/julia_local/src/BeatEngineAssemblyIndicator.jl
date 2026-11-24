@@ -68,6 +68,8 @@ end
 # finite population correction in each stratum and the magnitude of complex
 # deviations. Selecting the displayed peak from the same draw can add bias.
 function project_output(sample, dual, residual, direct)
+    dual isa AbstractVector || throw(ArgumentError("The adjoint must be a vector."))
+    residual isa AbstractVector || throw(ArgumentError("Sampled residuals must be a vector."))
     length(residual) == length(sample.rows) || throw(DimensionMismatch("One residual is required per sampled row."))
     validate_sample(sample, length(dual))
     contributions = conj.(dual[sample.rows]) .* residual
@@ -181,7 +183,7 @@ end
 # Stratify acoustic equations by their largest normalized adjoint weight across
 # the requested driver outputs. Half the budget samples the highest fifth. Every
 # BEM row has positive inclusion probability; the driver equations are a census.
-"""Stratify driver diagnostics; BEM budgets 2 or 3 can leave singleton strata (infinite standard error).
+"""Stratify driver diagnostics; BEM budgets 1 through 3 can leave singleton strata (infinite standard error).
 Use at least 4 BEM rows to avoid that budget-induced limitation when strata are large enough.
 """
 function driver_sample(rng, system, state, dual, budget)
