@@ -291,10 +291,12 @@ function Base.:\(factorization::RefinedDenseLU, rhs::AbstractVecOrMat)
         apply = isnothing(factorization.fallback) ? (r -> ComplexF64.(factorization.factor \ ComplexF32.(r))) :
                                                     (r -> factorization.fallback \ r)
         multiply = y -> factorization.matrix * y
+        apply_adjoint = isnothing(factorization.fallback) ? (r -> ComplexF64.(factorization.factor' \ ComplexF32.(r))) :
+                                                            (r -> factorization.fallback' \ r)
+        x, b = _as_matrix(solution), _as_matrix(target)
+        rounding = _residual_rounding(b, _dense_abs_product(factorization.matrix, x), size(x, 1))
         factorization.estimated_error, factorization.estimate_direction_check, factorization.error_bound =
-            _dense_error_estimate(apply, multiply, solution isa AbstractVector ? reshape(solution, :, 1) : solution,
-                                  residual isa AbstractVector ? reshape(residual, :, 1) : residual,
-                                  target isa AbstractVector ? reshape(target, :, 1) : target)
+            _dense_error_estimate(apply, multiply, x, _as_matrix(residual), b; apply_adjoint, rounding)
     else
         factorization.estimated_error, factorization.estimate_direction_check = Float64[], Bool[]
         factorization.error_bound = zeros(0, 0)
@@ -344,6 +346,7 @@ end
 using ..BeatEngineCoupled: SplitDenseMatrix, adopt_square_storage, SplitRefinedLU, SplitGMRES, _dense_solver_mode, release_split_factor!, _dense_split_enabled,
     _dense_spill_target, _dense_gmres_ir_enabled, _split_mul!, _split_opnorm_inf, _split_materialize,
     _split_precondition_double, _dense_error_estimate_enabled, _dense_error_estimate, _output_error_bound,
+    _residual_rounding,
     _dense_componentwise_enabled, _dense_componentwise_tolerance, _dense_abs_product, _acceptance_ratios,
     _componentwise_backward_errors, _refine_fallback!,
     _componentwise_note
@@ -412,30 +415,33 @@ estimated complex relative solver error, or `nothing` when the solver gives no c
 """
 function output_error_estimates(factorization, dense_solution::AbstractMatrix, ranges)
     source = factorization isa SplitGMRES ? factorization.fallback : factorization
-    (isnothing(source) || !hasproperty(source, :error_bound)) && return nothing
-    bound = source.error_bound
-    size(bound) == size(dense_solution) || return nothing
+    bound = (isnothing(source) || !hasproperty(source, :error_bound)) ? nothing : source.error_bound
+    # no componentwise bound (GMRES without fallback, estimate switched off): every output unknown
+    (isnothing(bound) || size(bound) != size(dense_solution)) &&
+        (bound = fill(NaN, size(dense_solution)))
     return Dict(field => reduce(hcat, [_output_error_bound(view(bound, :, j), view(dense_solution, :, j), rows)
                                        for j in axes(dense_solution, 2)]; init=zeros(length(rows), 0))
                 for (field, rows) in ranges)
 end
 
+# where the per-output estimates of the last solve live: the SplitGMRES fallback once it exists
+_output_estimate_store(factorization) =
+    factorization isa SplitGMRES && !isnothing(factorization.fallback) ? factorization.fallback : factorization
+
 function _store_output_estimates!(system, dense_solution)
-    factorization = system.factorization
-    store = factorization isa SplitGMRES ? factorization.fallback : factorization
+    store = _output_estimate_store(system.factorization)
     (isnothing(store) || !hasproperty(store, :output_estimates)) && return nothing
     ranges = (:diaphragm_velocity => system.mechanical_range, :voice_coil_current => system.electrical_range)
-    estimates = output_error_estimates(factorization, _as_matrix(dense_solution), ranges)
+    estimates = output_error_estimates(system.factorization, _as_matrix(dense_solution), ranges)
     # the outputs are stored as Complex{scalar_type}: add the complex rounding √2 u of that storage
     rounding = system.scalar_type === Float64 ? 0.0 : sqrt(2.0) * Float64(eps(system.scalar_type)) / 2
-    store.output_estimates = isnothing(estimates) ? nothing :
-                             Dict{Symbol,Matrix{Float64}}(field => m .+ rounding for (field, m) in estimates)
+    store.output_estimates = Dict{Symbol,Matrix{Float64}}(field => m .+ rounding for (field, m) in estimates)
     return nothing
 end
 
 function _output_estimate_diagnostics(system)
     factorization = hasproperty(system, :factorization) ? system.factorization : nothing
-    store = factorization isa SplitGMRES ? factorization.fallback : factorization
+    store = isnothing(factorization) ? nothing : _output_estimate_store(factorization)
     (isnothing(store) || !hasproperty(store, :output_estimates)) && return Dict{String,Any}()
     estimates = store.output_estimates
     isnothing(estimates) && return Dict{String,Any}()

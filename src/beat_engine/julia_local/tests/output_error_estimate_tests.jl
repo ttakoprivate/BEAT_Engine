@@ -137,3 +137,71 @@ end
         end
     end
 end
+
+@testset "REVIEW-22-b5ea266 P1: residual rounding is bounded, not taken from the correction" begin
+    # nearly singular 2x2 with a scaled second row; the residual of the converged solve is pure
+    # rounding, so the former σ ‖d‖ term underestimated entry 2 by about 90x without a hint
+    rng = MersenneTwister(1)
+    row = randn(rng, ComplexF64, 2)
+    A = vcat(transpose(row), transpose(row + 1e-4 * randn(rng, ComplexF64, 2)))
+    A[2, :] .*= 1e-3
+    b = reshape(A[:, 1] + 7e-12 * A[:, 2], 2, 1)
+    exact = setprecision(BigFloat, 256) do
+        Complex{BigFloat}.(A) \ Complex{BigFloat}.(b)
+    end
+    for factorization in (OE.SplitRefinedLU(oe_split(A, 0)), OE.RefinedDenseLU(copy(A)))
+        x = factorization \ b
+        truth = Float64.(abs.(Complex{BigFloat}.(x[:, 1]) .- exact[:, 1]))
+        @test isnothing(factorization.fallback)
+        @test all(b -> isnan(b) || b >= 0, factorization.error_bound)
+        @test all(isnan.(factorization.error_bound[:, 1]) .| (factorization.error_bound[:, 1] .>= truth))
+        system = (factorization=factorization, mechanical_range=2:2, electrical_range=1:1, scalar_type=Float32)
+        OE._store_output_estimates!(system, x)
+        diagnostics = withenv(() -> OE.dense_solver_diagnostics(system), "BLAB_OUTPUT_ERROR_HINT" => nothing)
+        # the true relative error of entry 2 is several percent: the hint must be raised
+        @test truth[2] / abs(x[2, 1]) > 1e-3
+        @test diagnostics["dense_output_recompute_float64_diaphragm_velocity"][1][1] === true
+        @test diagnostics["dense_output_recompute_float64"] === true
+    end
+end
+
+@testset "REVIEW-22-b5ea266 P1: a residual rounded to zero does not give a zero bound" begin
+    A = reshape(ComplexF64[3], 1, 1); b = reshape(ComplexF64[1], 1, 1)
+    exact = setprecision(BigFloat, 256) do
+        Complex{BigFloat}.(A) \ Complex{BigFloat}.(b)
+    end
+    for factorization in (OE.SplitRefinedLU(oe_split(A, 0)), OE.RefinedDenseLU(copy(A)))
+        x = factorization \ b
+        truth = Float64(abs(Complex{BigFloat}(x[1, 1]) - exact[1, 1]))
+        @test truth > 0
+        @test factorization.error_bound[1, 1] >= truth
+    end
+    # the estimator alone, with the reviewer's x = Float64(1/3) and its rounded-to-zero residual
+    x = reshape(ComplexF64[1 / 3], 1, 1)
+    residual = b .- A * x
+    @test iszero(residual)
+    rounding = OE._residual_rounding(b, abs.(A) * abs.(x), 1)
+    _, passed, bound = OE._dense_error_estimate(r -> A \ r, y -> A * y, x, residual, b;
+                                                apply_adjoint=r -> A' \ r, rounding)
+    @test passed == [true]
+    @test bound[1, 1] >= Float64(abs(big(1) / 3 - big(1 / 3)))
+    # without an adjoint solve (device factor) the componentwise bound is unknown
+    _, _, unknown = OE._dense_error_estimate(r -> A \ r, y -> A * y, x, residual, b)
+    @test isnan(unknown[1, 1])
+end
+
+@testset "REVIEW-22-b5ea266 P2: SplitGMRES without fallback reports unknown outputs and the hint" begin
+    A = ComplexF64[1 0; 0 1]
+    solver = OE.SplitGMRES(oe_split(A, 0))
+    x = solver \ reshape(ComplexF64[1, 2], 2, 1)
+    @test isnothing(solver.fallback)
+    system = (factorization=solver, mechanical_range=2:2, electrical_range=1:1, scalar_type=Float32)
+    OE._store_output_estimates!(system, x)
+    diagnostics = withenv(() -> OE.dense_solver_diagnostics(system), "BLAB_OUTPUT_ERROR_HINT" => nothing)
+    @test diagnostics["dense_output_estimated_relative_error_diaphragm_velocity"] == [[nothing]]
+    @test diagnostics["dense_output_estimated_relative_error_voice_coil_current"] == [[nothing]]
+    @test diagnostics["dense_output_recompute_float64_diaphragm_velocity"] == [[true]]
+    @test diagnostics["dense_output_recompute_float64"] === true
+    solver \ reshape(ComplexF64[1, 2], 2, 1)          # a new solve invalidates them
+    @test !haskey(OE.dense_solver_diagnostics(system), "dense_output_recompute_float64")
+end
