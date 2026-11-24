@@ -6,6 +6,7 @@ from . import SYSTEM_RESULT_VERSION, SYSTEM_SOLVE_REQUEST_VERSION, validate_solv
 
 WORKER_PROTOCOL_VERSION = 1
 FIELD_ARRAY_VERSION = 1
+CONTINUOUS_SPEAKER_ROM_VERSION = 1
 
 
 class WorkerCompatibilityError(RuntimeError):
@@ -71,6 +72,12 @@ def validate_worker_ready(info: dict) -> None:
                 isinstance(values, list) and all(isinstance(value, str) and bool(value.strip()) for value in values),
                 f"invalid {name} capabilities; expected a list of non-empty strings.",
             )
+    if "continuous_speaker_rom_versions" in info:
+        versions = info["continuous_speaker_rom_versions"]
+        _require(
+            isinstance(versions, list) and all(type(value) is int and value > 0 for value in versions),
+            "invalid continuous_speaker_rom_versions capabilities; expected a list of positive integers.",
+        )
     if "optional_output_quantities" in info:
         quantities = info["optional_output_quantities"]
         _require(
@@ -104,6 +111,13 @@ def negotiate_submission(info: dict, request: dict, operation: str) -> dict:
         ):
             _require(version in contracts[name], f"{name} version {version} is unavailable.")
         command["result_schema_version"] = SYSTEM_RESULT_VERSION
+        if "continuous_speaker_rom" in request["solver_options"]:
+            # Older workers ignore unknown solver options and would silently return no ROM.
+            _require(
+                CONTINUOUS_SPEAKER_ROM_VERSION in info.get("continuous_speaker_rom_versions", []),
+                f"continuous_speaker_rom version {CONTINUOUS_SPEAKER_ROM_VERSION} is unavailable; "
+                "update BEAT Engine and restart the worker.",
+            )
         if any(output["quantity"] == "interface_average_normal_velocity" for output in request["outputs"]):
             _require(
                 "interface_average_normal_velocity" in info.get("optional_output_quantities", []),

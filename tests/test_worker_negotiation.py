@@ -448,3 +448,60 @@ def test_invalid_exterior_kind_advertisement(ready, kinds):
 def test_missing_exterior_kinds_keeps_ideal_sources_compatible(ready, payload):
     ready.pop("exterior_component_kinds")
     assert negotiate_submission(ready, payload, "solve")["result_schema_version"] == 2
+
+
+def continuous_rom_payload(payload):
+    exterior_transducer_payload(payload)
+    payload["compiled_system"]["regions"].append(
+        {**copy.deepcopy(payload["compiled_system"]["regions"][0]), "id": "rom-air", "kind": "bounded_air"}
+    )
+    payload["solver_options"]["continuous_speaker_rom"] = {
+        "band_hz": [20.0, 250.0],
+        "max_rank": 64,
+        "max_training": 8,
+        "validation_count": 3,
+    }
+    return payload
+
+
+def test_continuous_rom_requires_advertised_version(ready, payload):
+    continuous_rom_payload(payload)
+    assert negotiate_submission(ready, payload, "solve")["result_schema_version"] == 2
+    for versions in (None, [], [2]):
+        old = copy.deepcopy(ready)
+        if versions is None:
+            old.pop("continuous_speaker_rom_versions")
+        else:
+            old["continuous_speaker_rom_versions"] = versions
+        with pytest.raises(WorkerCompatibilityError, match="continuous_speaker_rom version 1"):
+            negotiate_submission(old, payload, "solve")
+
+
+def test_missing_rom_capability_keeps_ordinary_requests(ready, payload):
+    ready.pop("continuous_speaker_rom_versions")
+    assert negotiate_submission(ready, payload, "solve")["result_schema_version"] == 2
+
+
+@pytest.mark.parametrize("versions", [None, {}, "1", [True], [1.0], [0], [-1], [1, "2"]])
+def test_rejects_malformed_continuous_rom_announcements(ready, payload, versions):
+    ready["continuous_speaker_rom_versions"] = versions
+    with pytest.raises(WorkerCompatibilityError, match="continuous_speaker_rom_versions"):
+        validate_worker_ready(ready)
+    with pytest.raises(WorkerCompatibilityError, match="continuous_speaker_rom_versions"):
+        negotiate_submission(ready, continuous_rom_payload(copy.deepcopy(payload)), "solve")
+
+
+def test_unsupported_continuous_rom_request_never_reaches_worker(tmp_path, ready, payload):
+    old = copy.deepcopy(ready)
+    old.pop("continuous_speaker_rom_versions")
+    worker, received = fake_worker(tmp_path, old)
+    path = tmp_path / "payload.json"
+    path.write_text(json.dumps(continuous_rom_payload(copy.deepcopy(payload))))
+    try:
+        with pytest.raises(WorkerCompatibilityError, match="continuous_speaker_rom version 1"):
+            worker.submit(path)
+        assert not received.exists()
+        path.write_text(json.dumps(payload))
+        assert list(worker.submit(path))[-1]["type"] == "completed"
+    finally:
+        worker.terminate()
