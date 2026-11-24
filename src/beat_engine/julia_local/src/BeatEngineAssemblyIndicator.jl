@@ -30,6 +30,7 @@ function sample_equations(rng, n, strata, counts)
     probability = Float64[]
     groups = UnitRange{Int}[]
     for (stratum, count) in zip(strata, counts)
+        count isa Integer && !(count isa Bool) || throw(ArgumentError("Sample budgets must be integers, not Bool."))
         isempty(stratum) && iszero(count) && continue
         1 <= count <= length(stratum) || throw(ArgumentError("Every nonempty stratum requires a positive sample."))
         selected = count == length(stratum) ? collect(stratum) : sort(collect(stratum)[randperm(rng, length(stratum))[1:count]])
@@ -40,10 +41,35 @@ function sample_equations(rng, n, strata, counts)
     return (; rows, probability, groups)
 end
 
+# Explicit calibration samples must have the same stratified design as generated samples.
+function validate_sample(sample, n)
+    rows, probability, groups = sample.rows, sample.probability, sample.groups
+    n > 0 && isempty(rows) && throw(ArgumentError("A nonempty system requires sampled rows."))
+    length(rows) == length(probability) || throw(DimensionMismatch("One probability is required per sampled row."))
+    all(row -> row isa Integer && !(row isa Bool) && 1 <= row <= n, rows) && allunique(rows) ||
+        throw(ArgumentError("Sampled rows must be distinct equation indices."))
+    all(p -> p isa Real && !(p isa Bool) && isfinite(p) && 0 < p <= 1, probability) ||
+        throw(ArgumentError("Inclusion probabilities must be finite and in (0, 1]."))
+    covered = Int[]
+    for group in groups
+        !isempty(group) && all(i -> i isa Integer && !(i isa Bool) && 1 <= i <= length(rows), group) ||
+            throw(ArgumentError("Sample groups must contain valid nonempty position sets."))
+        append!(covered, group)
+        p = probability[first(group)]
+        all(i -> probability[i] == p, group) ||
+            throw(ArgumentError("Inclusion probability must be constant within each sample group."))
+    end
+    sort(covered) == collect(eachindex(rows)) ||
+        throw(ArgumentError("Sample groups must partition all sampled positions."))
+    return nothing
+end
+
 # Horvitz-Thompson projection for a fixed output. The standard error uses the
 # finite population correction in each stratum and the magnitude of complex
 # deviations. Selecting the displayed peak from the same draw can add bias.
 function project_output(sample, dual, residual, direct)
+    length(residual) == length(sample.rows) || throw(DimensionMismatch("One residual is required per sampled row."))
+    validate_sample(sample, length(dual))
     contributions = conj.(dual[sample.rows]) .* residual
     delta = direct + sum(contributions ./ sample.probability)
     variance = 0.0
@@ -155,6 +181,9 @@ end
 # Stratify acoustic equations by their largest normalized adjoint weight across
 # the requested driver outputs. Half the budget samples the highest fifth. Every
 # BEM row has positive inclusion probability; the driver equations are a census.
+"""Stratify driver diagnostics; BEM budgets 2 or 3 can leave singleton strata (infinite standard error).
+Use at least 4 BEM rows to avoid that budget-induced limitation when strata are large enough.
+"""
 function driver_sample(rng, system, state, dual, budget)
     bem = collect(system.bem_range)
     budget >= 1 || throw(ArgumentError("The BEM row budget must be positive."))
@@ -242,9 +271,8 @@ function assembly_indicator(mixed, reference, excitation, state, sample=nothing;
     if isnothing(sample)
         sample = driver_sample(rng, mixed, state, dual, bem_budget)
     end
+    validate_sample(sample, length(state.x))
     rows, pi = sample.rows, sample.probability
-    length(rows) == length(pi) && allunique(rows) && all(p -> 0 < p <= 1, pi) ||
-        throw(ArgumentError("Invalid sampled rows or inclusion probabilities."))
     isbem = in.(rows, Ref(reference.bem_range))
     bem = rows[isbem]
     ref_at_x = replay(reference, excitation, state.x)

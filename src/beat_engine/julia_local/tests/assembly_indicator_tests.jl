@@ -68,3 +68,33 @@ end
     @test all(isone, draw(8).probability)
     @test_throws ArgumentError draw(0)
 end
+
+@testset "Explicit sample validation" begin
+    dual = ones(ComplexF64, 4)
+    residual = ComplexF64[1, 1, 1, 9]
+    valid = (rows=collect(1:4), probability=fill(0.5, 4), groups=[1:4])
+    @test AIE.project_output(valid, dual, residual, 0).stderr > 0
+    for groups in ([1:2], [1:3, 3:4], [1:4, 1:0], [0:3], [2:5])
+        @test_throws ArgumentError AIE.project_output(merge(valid, (; groups)), dual, residual, 0)
+    end
+    unequal = merge(valid, (probability=[0.5, 0.5, 0.25, 0.25],))
+    @test_throws ArgumentError AIE.project_output(unequal, dual, residual, 0)
+    @test_throws DimensionMismatch AIE.project_output(valid, dual, [1], 0)
+    @test_throws DimensionMismatch AIE.project_output(valid, dual, ones(5), 0)
+    @test_throws DimensionMismatch AIE.project_output(merge(valid, (probability=[0.5],)), dual, residual, 0)
+    for rows in ([1, 1, 3, 4], [0, 2, 3, 4], [1, 2, 3, 5])
+        @test_throws ArgumentError AIE.project_output(merge(valid, (; rows)), dual, residual, 0)
+    end
+    for probability in ([NaN, 0.5, 0.5, 0.5], zeros(4), fill(1.1, 4))
+        @test_throws ArgumentError AIE.project_output(merge(valid, (; probability)), dual, residual, 0)
+    end
+    census = merge(valid, (probability=ones(4), groups=[1:2, 3:4]))
+    @test AIE.project_output(census, dual, residual, 0).delta == sum(residual)
+    @test iszero(AIE.project_output(census, dual, residual, 0).stderr)
+    singleton = (rows=[1], probability=[0.5], groups=[1:1])
+    @test isinf(AIE.project_output(singleton, dual, [1], 0).stderr)
+    @test_throws ArgumentError AIE.project_output((rows=Int[], probability=Float64[], groups=UnitRange{Int}[]), dual, ComplexF64[], 0)
+    for budget in (true, 2.0)
+        @test_throws ArgumentError sample_equations(MersenneTwister(0), 4, (1:4,), (budget,))
+    end
+end
