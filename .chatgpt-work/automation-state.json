@@ -21,22 +21,22 @@
     22
   ],
   "lease": {
-    "holder": "work24-16-mwutpmyg",
-    "acquired_at": "2026-11-24T15:02:15.160Z",
-    "expires_at": "2026-11-24T16:32:15.160Z",
+    "holder": null,
+    "acquired_at": null,
+    "expires_at": null,
     "fencing_token": 14
   },
   "last_completed_run": {
-    "id": "work24-15-mwurj74k",
-    "started_at": "2026-11-24T14:01:15.476Z",
-    "completed_at": "2026-11-24T14:11:06.828Z",
-    "status": "output_error_bound_counterexample_review_published",
+    "id": "work24-16-mwutpmyg",
+    "started_at": "2026-11-24T15:02:15.160Z",
+    "completed_at": "2026-11-24T15:09:39.222Z",
+    "status": "output_diagnostic_fixes_verified_norm_limit_documented",
     "source_commit": "b34abee291207a13876068c99948d8ca386756fa",
     "checked_heads": {
       "9": "3d639cef853f6c60caa36fda4a8b39f28baec3f7",
       "14": "b2b756da7076cab3b32a63c822ec91af36a7e6ce",
       "19": "7afbaf4b3d88b1f15e39c12ab9a2a47473b336c9",
-      "22": "b5ea266651941d13bda57d13b1c54a22a5f8b59f",
+      "22": "25b706481d7c8918585cf57f241bfe9aae05aa81",
       "hmatrix-dev": "353abae7a530bad0ddeac4be787f03109f7da846"
     },
     "source_changes": false,
@@ -44,17 +44,17 @@
     "actions": [
       {
         "pr": 22,
-        "commit": "b5ea266651941d13bda57d13b1c54a22a5f8b59f",
-        "review_id": 6040732801,
-        "url": "https://github.com/ttakoprivate/BEAT_Engine/pull/22#pullrequestreview-6040732801",
-        "review_state": "CHANGES_REQUESTED"
+        "commit": "25b706481d7c8918585cf57f241bfe9aae05aa81",
+        "review_id": 6041842035,
+        "url": "https://github.com/ttakoprivate/BEAT_Engine/pull/22#pullrequestreview-6041842035",
+        "review_state": "COMMENTED"
       }
     ],
-    "evidence": "Fresh clone, official SHA256 verified Julia1.12.6, own depot, CPU project instantiated. New PR22 requested bounded review. Official output tests300/300 pass;4 independent JSON/invalidation checks and3 GMRES observations pass; calibration reproduces1.729/2.852. Independently found actual SplitRefinedLU counterexample cond9.68e6 with weak row1e-3, passed direction check and no fallback: nonzero synthetic output complex relative error0.0537008 vs estimate0.000596123; default threshold0.001 produces false recompute hint. Also zero computed residual returns zero bound despite nonzero BigFloat error; GMRES without fallback omits unknown output/hint. All probe exits0, no skips, no source changes. Scoped review requests changes; no full reference gate/physical/GPU qualification.",
+    "evidence": "Fresh clone, own official SHA256 verified Julia1.12.6 and depot; instantiate exit0. Output tests326/326 and split tests326 passed+3 preexisting Broken;5 own checks, total657 passed3 Broken/no other skips. Old synthetic nonzero counterexample now hints true on both solvers: Split true0.0537008 estimate20.07586; dense true0.0564381 estimate20.24558. Zero residual and GMRES unknown fixes pass. Isolated norm-estimator limitation reproduced: B=I+2^20 vv',v=[0,1,1,-1,-1,0,0,0],f=ones; estimator1.000000000011 vs actualInfNorm4194305. This is not a new end-to-end solver false hint; proves factor3 not a general norm upper bound. Comment review confirms specific repairs, documents heuristic limit and requests stale PR body update. Clean source, no full reference/physical/GPU run.",
     "pending": [
-      "PR22 author correction of residual-rounding/componentwise bound and missing GMRES unknown diagnostics; recheck published reproducible nonzero-output counterexample before accepting any new margin.",
-      "PR14 N1/N2 follow-upb2b756d published; full row-quadrature/adjoint review and h343 hardware qualification remain open.",
-      "PR19 numerical/export findings and owner merge-splitting decision remain open; three ROM protocol fixes confirmed at7afbaf4.",
+      "PR22 old P1/P2 counterexamples now verified fixed at25b7064. Norm/contraction estimates remain heuristic: isolated blind-direction example documented; no general conservative1% guarantee. Author should update stale sigma4/calibration/cost PR description and document regression/limits.",
+      "PR14 N1/N2 follow-upb2b756d published; full row-quadrature/adjoint review and h343 hardware qualification open.",
+      "PR19 numerical/export findings and owner merge-splitting decision open; three ROM protocol fixes confirmed at7afbaf4.",
       "Issue12 awaits VACS sample/format answers; PR17 merged, PR9 roadmap update planned by author."
     ],
     "continuation": "Execution and GitHub access work. Continue checking new assigned work and Claude changes; normal external review/data/hardware waits do not stop this worker. Do not repeat unchanged findings or owner questions."
