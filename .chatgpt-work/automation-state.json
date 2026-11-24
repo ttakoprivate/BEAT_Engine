@@ -21,39 +21,39 @@
     22
   ],
   "lease": {
-    "holder": "work24-12-mwul55ay",
-    "acquired_at": "2026-11-24T11:02:22.235Z",
-    "expires_at": "2026-11-24T12:32:22.235Z",
+    "holder": null,
+    "acquired_at": null,
+    "expires_at": null,
     "fencing_token": 11
   },
   "last_completed_run": {
-    "id": "work24-11-mwuiz5j9",
-    "started_at": "2026-11-24T10:01:43.366Z",
-    "completed_at": "2026-11-24T10:04:14.647Z",
-    "status": "three_rom_protocol_fixes_independently_verified",
+    "id": "work24-12-mwul55ay",
+    "started_at": "2026-11-24T11:02:22.235Z",
+    "completed_at": "2026-11-24T11:21:06.287Z",
+    "status": "indicator_explicit_sample_review_fixes_published",
     "source_commit": "b34abee291207a13876068c99948d8ca386756fa",
     "checked_heads": {
       "9": "3d639cef853f6c60caa36fda4a8b39f28baec3f7",
-      "14": "e9af918a436f93afdb630f06af539d08f45f46c8",
+      "14": "8ea9d7459408d92570eaad03c12c89dae6b20c49",
       "19": "7afbaf4b3d88b1f15e39c12ab9a2a47473b336c9",
       "hmatrix-dev": "353abae7a530bad0ddeac4be787f03109f7da846"
     },
-    "source_changes": false,
+    "source_changes": true,
     "tests_rerun": true,
     "actions": [
       {
-        "pr": 19,
-        "commit": "7afbaf4b3d88b1f15e39c12ab9a2a47473b336c9",
-        "review_id": 6037199060,
-        "url": "https://github.com/ttakoprivate/BEAT_Engine/pull/19#pullrequestreview-6037199060",
-        "review_state": "COMMENTED"
+        "pr": 14,
+        "commit": "8ea9d7459408d92570eaad03c12c89dae6b20c49",
+        "comment_id": 7129973583,
+        "url": "https://github.com/ttakoprivate/BEAT_Engine/pull/14#issuecomment-7129973583",
+        "draft": true
       }
     ],
-    "evidence": "Fresh clone and own venv; Python281 passed/1 Windows API skip, Ruff passed, exit0. Independent scratch probe exit0:11 capability rejection cases;4 transport guards for exterior/interior and absent/negative phasor, each followed by successful positive coupled transport with matching echoed diagnostics; ordinary request default preserved. Version, solve-kind and phasor fixes confirmed. No source edits or numerical/GPU execution. Scoped review COMMENT, not full PR approval.",
+    "evidence": "Claude bounded review6037561901 confirmed estimator mathematics and reported B1/B2 sample-group/residual robustness gaps. Independently reproduced3 old counterexamples on Julia1.12.6. Added shared sample validation, residual dimension guard, integer-not-Bool budget validation, singleton budget docs and22 regressions. Fresh official SHA256 verified Julia1.12.6, own depot CPU project instantiated exit0; final focused suite47/47 and standalone reference gate2482/2482 across58 testsets, exit0/no skips. Published8ea9d7459408d92570eaad03c12c89dae6b20c49 via expected-SHA update; both files re-read byte-identical to tested source. No Python changes or baseline regeneration. No fresh physical calibration, performance claims or GPU qualification.",
     "pending": [
-      "PR19 remaining numerical/export findings and owner decision on merge splitting remain open. The three reviewed ROM protocol fixes are confirmed at7afbaf4; do not repeat unchanged protocol findings.",
-      "PR14 independent review/h343 hardware checks await owner/Claude; issue12 awaits VACS sample/format answers.",
-      "PR17 is merged; PR9 roadmap update planned by author."
+      "PR14 small follow-up8ea9d74 awaits independent recheck; bounded mathematics review now exists. Row quadrature, adjoint replay/reconstruction and h343 hardware/full PR qualification remain open.",
+      "PR19 numerical/export findings and owner merge-splitting decision remain open; three ROM protocol fixes already confirmed at7afbaf4, no unchanged repeat.",
+      "Issue12 awaits VACS sample/format answers; PR17 merged, PR9 roadmap update planned by author."
     ],
     "continuation": "Execution and GitHub access work. Continue checking new assigned work and Claude changes; normal external review/data/hardware waits do not stop this worker. Do not repeat unchanged findings or owner questions."
   },
