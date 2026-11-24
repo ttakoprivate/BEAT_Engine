@@ -253,6 +253,54 @@ const OE_FIELD_POINTS = [SVector(sin(t), 0.0, cos(t)) for t in range(0, pi; leng
     @test galerkin_field_error_bound_cpu(OE_FIELD_POINTS, zeros(nodes), zeros(elements), k, cache) == zeros(length(OE_FIELD_POINTS))
 end
 
+# REVIEW-22-9abe18c P1: Float64 reconstruction q = W p - h with cancellation, exact input solution.
+function oe_cancellation_system(blockwise)
+    W = reshape(ComplexF64[1e20], 1, 1)
+    elimination = blockwise ?
+        (bem_of_gamma=[1], motion_solution=zeros(ComplexF64, 1, 0), schur_blocks=[W],
+         mass_operator=(count=1, blocks=[(dofs=1:1, rows=1:1)])) :
+        (bem_of_gamma=[1], motion_solution=zeros(ComplexF64, 1, 0), schur_solution=W)
+    return (scalar_type=Float32, interface_elimination=:flux, interface_elimination_data=elimination,
+            bem_range=1:1, mechanical_range=2:1, flux_range=2:1, density=1f0, omega=1f0,
+            interface_operators=(bem_flux=reshape(ComplexF64[1], 1, 1),),
+            transducer_operators=(bem_normal_velocity=zeros(ComplexF64, 1, 0),))
+end
+
+@testset "REVIEW-22-9abe18c P1: rounding of the Float64 flux reconstruction under cancellation" begin
+    W = reshape(ComplexF64[1e20], 1, 1)
+    x = reshape(ComplexF64[1 + eps(Float64)], 1, 1)
+    h = reshape(ComplexF64[1e20], 1, 1)
+    stored = ComplexF32.(W * x - h)
+    exact = setprecision(BigFloat, 256) do
+        Float64(abs(Complex{BigFloat}(W[1]) * Complex{BigFloat}(x[1]) - Complex{BigFloat}(h[1])))
+    end
+    truth = abs(ComplexF64(stored[1]) - exact)
+    @test truth > 5000                            # the counterexample: 16384 stored, 22204.46 exact
+    for blockwise in (false, true)
+        system = oe_cancellation_system(blockwise)
+        bounds = OE._field_input_bounds(system, x, zeros(1, 1), stored; flux_rhs=h)
+        @test bounds.neumann[1] >= truth
+        # without h the reconstruction rounding is unknown, not silently zero
+        @test all(isnan, OE._field_input_bounds(system, x, zeros(1, 1), stored).neumann)
+    end
+end
+
+# REVIEW-22-9abe18c P2: the Float32 field kernel rounds the point first; the bound must use that point.
+@testset "REVIEW-22-9abe18c P2: field bound at a Float32 near point" begin
+    mesh = load_gmsh22_with_tags(joinpath(OE_FIXTURES, "exterior_conforming.msh"), 0.001f0)
+    cache = BeatEngineCore.FieldEvaluationCache{Float32}([SVector(prevfloat(1f0), 0f0, 0f0)], [SVector(0f0, 1f0, 0f0)],
+                                                         Float32[1], [(1, 2, 3)], [1], [SVector(1f0, 0f0, 0f0)])
+    points = [SVector(1.0 + 0.49 * eps(Float32), 0.0, 0.0)]
+    nodes = length(mesh.vertices); elements = length(mesh.faces)
+    q = zeros(ComplexF32, elements); q[1] = 1
+    change = abs(evaluate_galerkin_field_cpu(points, mesh, zeros(ComplexF32, nodes), q, 0f0, cache)[1] -
+                 evaluate_galerkin_field_cpu(points, mesh, zeros(ComplexF32, nodes), zeros(ComplexF32, elements), 0f0, cache)[1])
+    qb = zeros(elements); qb[1] = 1.0
+    bound = galerkin_field_error_bound_cpu(points, zeros(nodes), qb, 0.0, cache)[1]
+    @test change > 1e6
+    @test bound >= change * (1 - 1e-6)            # Float32 kernel arithmetic vs Float64 modulus
+end
+
 function oe_coupled(::Type{T}, f, env...) where {T}
     fem = load_gmsh41_volume(joinpath(OE_FIXTURES, "femvolume.msh"), T(0.001))
     bem = load_gmsh22_with_tags(joinpath(OE_FIXTURES, "exterior_conforming.msh"), T(0.001))

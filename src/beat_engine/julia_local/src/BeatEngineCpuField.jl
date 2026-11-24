@@ -55,7 +55,8 @@ Propagate componentwise absolute bounds of the boundary data through the field r
 `evaluate_galerkin_field_cpu` (step 2 of docs/ROADMAP.md, display only). With `|Δp_a| <=
 pressure_bound[a]` (nodes) and `|Δq_e| <= neumann_bound[e]` (elements) the field error at `x` is at
 most `Σ_s |w_s| (|∂G/∂n| Σ_a |φ_a| pressure_bound[a] + |G| neumann_bound[e_s])`, the same sum over
-the same quadrature sources as the field. Kernel moduli are taken in Float64. `NaN` bounds give `NaN`.
+the same quadrature sources as the field, at the evaluation point rounded to the cache precision as
+the field kernel does. Kernel moduli are taken in Float64. `NaN` bounds give `NaN`.
 Covers the propagated input error only; the rounding of the field sum itself is not included.
 """
 function galerkin_field_error_bound_cpu(eval_points, pressure_bound::AbstractVector, neumann_bound::AbstractVector,
@@ -63,8 +64,10 @@ function galerkin_field_error_bound_cpu(eval_points, pressure_bound::AbstractVec
     k = ComplexF64(outgoing_wavenumber(k))
     bounds = zeros(Float64, length(eval_points))
     source_count = length(cache.source_points)
+    # the field kernel rounds the point to the cache precision first (REVIEW-22-9abe18c P2): use that point
+    R = eltype(cache.source_weights)
     Threads.@threads for point_index in eachindex(eval_points)
-        x = SVector{3,Float64}(eval_points[point_index][1], eval_points[point_index][2], eval_points[point_index][3])
+        x = SVector{3,Float64}(R(eval_points[point_index][1]), R(eval_points[point_index][2]), R(eval_points[point_index][3]))
         total = 0.0
         for source_index in 1:source_count
             r_vec = SVector{3,Float64}(cache.source_points[source_index]) - x

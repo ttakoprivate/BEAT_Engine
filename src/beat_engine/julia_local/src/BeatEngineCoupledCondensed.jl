@@ -445,14 +445,15 @@ end
 # the solver error of the boundary data the field is evaluated from (`bem_pressure` per BEM node,
 # `bem_neumann` per BEM element, per excitation), propagated from the componentwise bound of
 # `_dense_error_estimate` through the same reconstruction as `solve_condensed_coupled_excitations`
-# and `_solution_from_parts`, plus the rounding of storing them as Complex{scalar_type} and of the
-# Complex{scalar_type} Neumann product. `field_output_error_estimates` carries them to the field.
+# and `_solution_from_parts`, plus the Float64 rounding of the flux reconstruction (bounded by its
+# summands, so cancellation is covered), the rounding of storing them as Complex{scalar_type} and of
+# the Complex{scalar_type} Neumann product. `field_output_error_estimates` carries them to the field.
 
 # |M| |x| with NaN in x kept local to the rows that use it (0 * NaN would spread it otherwise)
 _abs_product(matrix, x::AbstractVecOrMat) = abs.(matrix) * x
 
 function _field_input_bounds(system, dense_solution::AbstractMatrix, bound::AbstractMatrix,
-                             interface_flux::AbstractMatrix)
+                             interface_flux::AbstractMatrix; flux_rhs=nothing)
     T = system.scalar_type
     u = T === Float64 ? 0.0 : Float64(eps(T)) / 2
     mode = hasproperty(system, :interface_elimination) ? system.interface_elimination : :none
@@ -471,6 +472,34 @@ function _field_input_bounds(system, dense_solution::AbstractMatrix, bound::Abst
             _abs_product(elimination.schur_solution, gamma_bound)
         end
         isempty(system.mechanical_range) || (propagated .+= _abs_product(elimination.motion_solution, velocity_bound))
+        # Float64 rounding of the reconstruction q = W p - h + V v itself (REVIEW-22-9abe18c P1): with
+        # cancellation it is not proportional to |q|, so bound it by the summands, √2 γ_w (|W||p| + |h| +
+        # |V||v|), w = entries per row of W and V + 2 additions. Without h it is unknown (NaN).
+        if isnothing(flux_rhs) || size(flux_rhs) != size(propagated)
+            propagated .= NaN
+        else
+            gamma_values = abs.(ComplexF64.(dense_solution[system.bem_range, :][elimination.bem_of_gamma, :]))
+            summands = abs.(ComplexF64.(flux_rhs))
+            widths = if hasproperty(elimination, :mass_operator)
+                width = 0
+                for (block, schur_block) in zip(elimination.mass_operator.blocks, elimination.schur_blocks)
+                    @views summands[block.dofs, :] .+= _abs_product(schur_block, gamma_values[block.rows, :])
+                    width = max(width, size(schur_block, 2))
+                end
+                width
+            else
+                summands .+= _abs_product(elimination.schur_solution, gamma_values)
+                size(elimination.schur_solution, 2)
+            end
+            if !isempty(system.mechanical_range)
+                summands .+= _abs_product(elimination.motion_solution,
+                                          abs.(ComplexF64.(dense_solution[system.mechanical_range, :])))
+                widths += size(elimination.motion_solution, 2)
+            end
+            w = widths + 2
+            u64 = eps(Float64) / 2
+            propagated .+= sqrt(2.0) * (w * u64 / (1 - w * u64)) .* summands
+        end
         propagated
     else
         bound[system.flux_range, :]
@@ -498,14 +527,15 @@ function _field_input_bounds(system, dense_solution::AbstractMatrix, bound::Abst
     return (pressure=pressure_bound, neumann=neumann_bound)
 end
 
-function _store_field_input_bounds!(system, dense_solution, interface_flux)
+function _store_field_input_bounds!(system, dense_solution, interface_flux; flux_rhs=nothing)
     store = _output_estimate_store(system.factorization)
     (isnothing(store) || !hasproperty(store, :field_input_bounds)) && return nothing
     source = system.factorization isa SplitGMRES ? system.factorization.fallback : system.factorization
     solution = _as_matrix(dense_solution)
     bound = (isnothing(source) || !hasproperty(source, :error_bound)) ? nothing : source.error_bound
     (isnothing(bound) || size(bound) != size(solution)) && (bound = fill(NaN, size(solution)))
-    store.field_input_bounds = _field_input_bounds(system, solution, bound, _as_matrix(interface_flux))
+    store.field_input_bounds = _field_input_bounds(system, solution, bound, _as_matrix(interface_flux);
+                                                     flux_rhs=isnothing(flux_rhs) ? nothing : _as_matrix(flux_rhs))
     return nothing
 end
 
@@ -3232,7 +3262,8 @@ function solve_condensed_coupled_excitations(system, excitations; reconstruct_in
         Complex{T}.(bem_gamma), Complex{T}.(flux)
     end
     solve_split[:flux_reconstruction] = (time_ns() - flux_reconstruction_started) / 1.0e9
-    _store_field_input_bounds!(system, dense_solution, interface_flux)
+    _store_field_input_bounds!(system, dense_solution, interface_flux;
+                               flux_rhs=elimination_mode == :flux ? flux_rhs_solution : nothing)
     reconstruction_started = time_ns()
     fem_pressure, fem_interior_residual = if reconstruct_interior
         _backward_schur(
