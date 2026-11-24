@@ -160,6 +160,14 @@ def negotiate_submission(info: dict, request: dict, operation: str) -> dict:
                 f"continuous_speaker_rom version {CONTINUOUS_SPEAKER_ROM_VERSION} is unavailable; "
                 "update BEAT Engine and restart the worker.",
             )
+            # The ROM trainer accepts only exp(+i omega t); unlike ordinary solves it has no
+            # negative-phasor path, so the effective convention (including the default) is checked
+            # here instead of letting the worker abort after accepting the job.
+            rom_convention = options.get("phasor_convention", "exp(-i omega t)")
+            _require(
+                rom_convention == "exp(+i omega t)",
+                f"continuous_speaker_rom requires phasor convention 'exp(+i omega t)', not {rom_convention!r}.",
+            )
         for component in request["compiled_system"]["components"]:
             if kind == "exterior_bem":
                 _require(

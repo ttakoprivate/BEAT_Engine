@@ -251,6 +251,7 @@ def test_rejects_unavailable_backend_without_fallback(ready, payload, backend, m
 
 
 def fake_worker(tmp_path, info):
+    """Stub worker; it echoes an explicitly requested phasor convention like the engine does."""
     script = tmp_path / "worker.py"
     received = tmp_path / "received.jsonl"
     script.write_text(
@@ -260,7 +261,11 @@ print(json.dumps({info!r}), flush=True)
 for line in sys.stdin:
     with pathlib.Path({str(received)!r}).open('a') as stream:
         stream.write(line)
-    print(json.dumps({{"type": "result", "result": {{"schema_version": 2}}}}), flush=True)
+    result = json.loads('{{"schema_version": 2}}')
+    phasor = json.loads(line).get("phasor_convention")
+    if phasor is not None:
+        result["diagnostics"] = {{"phasor_convention": phasor}}
+    print(json.dumps({{"type": "result", "result": result}}), flush=True)
     print(json.dumps({{"type": "completed"}}), flush=True)
 """,
         encoding="utf-8",
@@ -461,6 +466,7 @@ def continuous_rom_payload(payload):
         "max_training": 8,
         "validation_count": 3,
     }
+    payload["solver_options"]["phasor_convention"] = "exp(+i omega t)"
     return payload
 
 
@@ -539,5 +545,45 @@ def test_uncoupled_continuous_rom_request_never_reaches_worker(tmp_path, ready, 
         assert list(worker.submit(path))[-1]["type"] == "completed"
         command = json.loads(received.read_text())
         assert command["operation"] == "solve"
+    finally:
+        worker.terminate()
+
+
+@pytest.mark.parametrize("convention", [None, "exp(-i omega t)"])
+def test_continuous_rom_requires_positive_phasor(ready, payload, convention):
+    assert "exp(-i omega t)" in ready["phasor_conventions"]
+    continuous_rom_payload(payload)
+    if convention is None:
+        payload["solver_options"].pop("phasor_convention")
+    else:
+        payload["solver_options"]["phasor_convention"] = convention
+    with pytest.raises(WorkerCompatibilityError, match=r"requires phasor convention 'exp\(\+i omega t\)'"):
+        negotiate_submission(ready, payload, "solve")
+
+
+def test_ordinary_requests_keep_negative_phasor_default(ready, payload):
+    command = negotiate_submission(ready, payload, "solve")
+    assert "phasor_convention" not in command
+    assert "phasor_convention" not in payload["solver_options"]
+
+
+@pytest.mark.parametrize("convention", [None, "exp(-i omega t)"])
+def test_negative_phasor_rom_request_never_reaches_worker(tmp_path, ready, payload, convention):
+    worker, received = fake_worker(tmp_path, ready)
+    rom = continuous_rom_payload(copy.deepcopy(payload))
+    if convention is None:
+        rom["solver_options"].pop("phasor_convention")
+    else:
+        rom["solver_options"]["phasor_convention"] = convention
+    path = tmp_path / "payload.json"
+    path.write_text(json.dumps(rom))
+    try:
+        with pytest.raises(WorkerCompatibilityError, match="requires phasor convention"):
+            worker.submit(path)
+        assert not received.exists()
+        path.write_text(json.dumps(continuous_rom_payload(copy.deepcopy(payload))))
+        assert list(worker.submit(path))[-1]["type"] == "completed"
+        command = json.loads(received.read_text())
+        assert command["phasor_convention"] == "exp(+i omega t)"
     finally:
         worker.terminate()
