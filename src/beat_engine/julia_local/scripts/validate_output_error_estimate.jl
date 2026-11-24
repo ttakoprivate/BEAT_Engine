@@ -4,7 +4,9 @@
 # (a) the ComplexF64 LU of the same mixed-precision assembled system (solver error, what the estimate
 #     covers) and (b) the fully Float64 build (includes the Float32 assembly error of step 4, which
 #     the estimate does not cover; reported for context only).
-# A "false release" is an entry with estimate < true error (a).
+# A "false release" is an entry with estimate < true error (a). Field points (a 1-m arc of
+# FIELD_POINTS points in the x-z plane): `field_output_error_estimates` against the field of (a), both
+# fields evaluated in Float64 from the stored boundary data, so the difference is the solver error.
 #
 #   julia --project=src/beat_engine/julia_local \
 #     src/beat_engine/julia_local/scripts/validate_output_error_estimate.jl [frequency_hz ...]
@@ -27,6 +29,8 @@ function setup(::Type{T}) where {T}
     return (; fem, bem, map, transducer)
 end
 
+const FIELD_POINTS = [SVector(sin(t), 0.0, cos(t)) for t in range(0, pi; length=13)]
+
 function solve(s, ::Type{T}, f, env...) where {T}
     system = withenv(env...) do
         build_condensed_coupled_system(s.fem, s.bem, s.map, T(f), T(343), T(1.21); transducers=[s.transducer])
@@ -37,7 +41,12 @@ function solve(s, ::Type{T}, f, env...) where {T}
         solutions = withenv(env...) do
             solve_condensed_coupled_excitations(system, excitations)
         end
-        return solutions, BeatEngineCoupledCondensed.dense_solver_diagnostics(system)
+        fields = [evaluate_galerkin_field_cpu(FIELD_POINTS, s.bem, x.bem_pressure, x.bem_neumann,
+                                              system.wavenumber, system.field_cache) for x in solutions]
+        field_estimates = BeatEngineCoupledCondensed.field_output_error_estimates(system, FIELD_POINTS, fields,
+                                                                                  system.field_cache)
+        return solutions, BeatEngineCoupledCondensed.dense_solver_diagnostics(system), field_estimates,
+               system.wavenumber, system.regular_quadrature_order
     finally
         release_condensed_coupled_system!(system)
     end
@@ -47,12 +56,17 @@ relative(c, r) = iszero(r) ? (iszero(c) ? 0.0 : Inf) : abs(ComplexF64(c) - Compl
 
 common = ("BLAB_COUPLED_TRANSDUCER_CONDENSATION" => "1", "BLAB_COUPLED_INTERFACE_FLUX_ELIMINATION" => "1")
 s32 = setup(Float32); s64 = setup(Float64)
+cache64 = nothing   # Float64 cache with the quadrature of the solved system, built on first use
+field64(x, k) = evaluate_galerkin_field_cpu(FIELD_POINTS, s64.bem, ComplexF64.(x.bem_pressure),
+                                            ComplexF64.(x.bem_neumann), Float64(k), cache64)
 false_releases = 0; entries = 0; worst_margin = Inf
+field_false = 0; field_entries = 0; field_margin = Inf; field_worst = 0.0
 for f in frequencies
-    same_a, _ = solve(s32, Float32, f, common..., "BLAB_COUPLED_DENSE_REFINEMENT" => "0", "BLAB_COUPLED_DENSE_FLOAT64" => "1")
-    full64, _ = solve(s64, Float64, f, common...)
+    same_a, _, _, k, rule = solve(s32, Float32, f, common..., "BLAB_COUPLED_DENSE_REFINEMENT" => "0", "BLAB_COUPLED_DENSE_FLOAT64" => "1")
+    global cache64 = build_field_evaluation_cache(s64.bem, triangle_rule(Float64, rule))
+    full64, _, _, _, _ = solve(s64, Float64, f, common...)
     for split in ("auto", "0")
-        candidate, diagnostics = solve(s32, Float32, f, common..., "BLAB_COUPLED_DENSE_REFINEMENT" => "1",
+        candidate, diagnostics, field_estimates, _, _ = solve(s32, Float32, f, common..., "BLAB_COUPLED_DENSE_REFINEMENT" => "1",
                                        "BLAB_COUPLED_DENSE_FLOAT64" => "0", "BLAB_COUPLED_DENSE_SPLIT" => split)
         @printf("\n%.0f Hz split=%s solver=%s normwise estimate=%s hint=%s\n", f, split, diagnostics["dense_solver"],
                 string(get(diagnostics, "dense_estimated_relative_error", nothing)),
@@ -71,7 +85,24 @@ for f in frequencies
                         k, field, i, est, solver, total)
             end
         end
+        max_estimate = 0.0; max_total = 0.0
+        for k_exc in eachindex(candidate)
+            c = field64(candidate[k_exc], k); r = field64(same_a[k_exc], k); t = field64(full64[k_exc], k)
+            for i in eachindex(FIELD_POINTS)
+                est = field_estimates[i, k_exc]; solver = relative(c[i], r[i]); total = relative(c[i], t[i])
+                global field_entries += 1; global field_worst = max(field_worst, est)
+                max_estimate = max(max_estimate, est); max_total = max(max_total, total)
+                isnan(est) || est >= solver || (global field_false += 1)
+                solver > 0 && (global field_margin = min(field_margin, est / solver))
+                i in (1, 7, 13) && @printf("  exc%d field point %2d estimate %.3e | true vs F64-LU(same A) %.3e | vs full F64 build %.3e\n",
+                                          k_exc, i, est, solver, total)
+            end
+        end
+        @printf("  field, all %d points and excitations: largest estimate %.3e, largest error vs full F64 build %.3e\n",
+                length(FIELD_POINTS), max_estimate, max_total)
     end
 end
+@printf("\nfield points: entries %d, false releases %d, smallest estimate/true %.3g, largest estimate %.3e\n",
+        field_entries, field_false, field_margin, field_worst)
 @printf("\nentries %d, false releases (estimate < true solver error) %d, smallest estimate/true %.3g\n",
         entries, false_releases, worst_margin)

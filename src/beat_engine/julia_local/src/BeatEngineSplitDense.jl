@@ -688,6 +688,7 @@ mutable struct SplitRefinedLU
     estimate_direction_check::Vector{Bool}
     error_bound::Matrix{Float64}              # componentwise solver-error bound of the last solve
     output_estimates::Union{Nothing,Dict{Symbol,Matrix{Float64}}}   # set by the coupled solve
+    field_input_bounds::Union{Nothing,NamedTuple}   # set by the coupled solve, see _store_field_input_bounds!
     spill_path::Union{Nothing,String}
     # A factor held elsewhere (the CUDA LU on the device): `device_solve(x::Matrix{ComplexF32})`
     # returns the ComplexF64 host solution, `release_device()` frees it. `factor` is then nothing.
@@ -712,7 +713,7 @@ function SplitRefinedLU(matrix::SplitDenseMatrix)
     matrix_norm = _split_opnorm_inf(matrix.hi, matrix)
     store, spill_path = isnothing(spill_directory) ? (matrix.hi, nothing) : _split_spill(matrix.hi, spill_directory)
     refined = SplitRefinedLU(matrix, store, matrix_norm, nothing, nothing, 0, 0, nothing, NaN, NaN,
-                             _split_componentwise_tolerance(n), Float64[], Bool[], zeros(0, 0), nothing, spill_path, nothing, nothing, 0)
+                             _split_componentwise_tolerance(n), Float64[], Bool[], zeros(0, 0), nothing, nothing, spill_path, nothing, nothing, 0)
     if matrix.overflow
         _split_fall_back!(refined, "an entry is outside the Float32 range")
         return refined
@@ -746,7 +747,7 @@ function SplitRefinedLU(matrix::SplitDenseMatrix, device_solve::Function, releas
     store, spill_path = isnothing(spill_directory) ? (matrix.hi, nothing) : _split_spill(matrix.hi, spill_directory)
     isnothing(spill_path) || (matrix.hi = Matrix{ComplexF32}(undef, 0, 0))
     return SplitRefinedLU(matrix, store, matrix_norm, nothing, nothing, 0, 0, nothing, NaN, NaN,
-                          _split_componentwise_tolerance(n), Float64[], Bool[], zeros(0, 0), nothing,
+                          _split_componentwise_tolerance(n), Float64[], Bool[], zeros(0, 0), nothing, nothing,
                           spill_path, device_solve, release_device, 0)
 end
 
@@ -852,6 +853,7 @@ function _split_solve_columns(factorization::SplitRefinedLU, target::Matrix{Comp
     residual = similar(target)          # holds the final residual on every successful exit
     solution = _split_solve_columns!(factorization, target, residual)
     factorization.output_estimates = nothing
+    factorization.field_input_bounds = nothing
     if _dense_error_estimate_enabled()
         apply = isnothing(factorization.fallback) ? (r -> _split_precondition(factorization, r)) :
                                                     (r -> factorization.fallback \ r)
@@ -1023,6 +1025,7 @@ mutable struct SplitGMRES
     # per-output estimates of the last coupled solve without fallback: unknown (NaN), see
     # _store_output_estimates! (GMRES gives no componentwise bound)
     output_estimates::Union{Nothing,Dict{Symbol,Matrix{Float64}}}
+    field_input_bounds::Union{Nothing,NamedTuple}
 end
 
 function SplitGMRES(matrix::SplitDenseMatrix)
@@ -1042,7 +1045,7 @@ function SplitGMRES(matrix::SplitDenseMatrix)
                       _dense_gmres_setting("BLAB_COUPLED_DENSE_GMRES_TOL", 1e-10),
                       _dense_gmres_setting("BLAB_COUPLED_DENSE_GMRES_RESTART", 100),
                       _dense_gmres_setting("BLAB_COUPLED_DENSE_GMRES_MAXITER", 2000),
-                      0, 0, NaN, 0.0, 0.0, nothing, nothing, nothing)
+                      0, 0, NaN, 0.0, 0.0, nothing, nothing, nothing, nothing)
 end
 
 Base.size(solver::SplitGMRES, dims...) = size(solver.store, dims...)
@@ -1051,6 +1054,7 @@ release_split_factor!(solver::SplitGMRES) = (solver.fallback === nothing || rele
 function Base.:\(solver::SplitGMRES, rhs::AbstractVecOrMat)
     all(isfinite, rhs) || throw(ArgumentError("dense coupled right-hand side has non-finite entries"))
     solver.output_estimates = nothing
+    solver.field_input_bounds = nothing
     solver.fallback === nothing || return solver.fallback \ rhs
     started = time_ns()
     target = rhs isa AbstractVector ? reshape(ComplexF64.(rhs), :, 1) : ComplexF64.(rhs)

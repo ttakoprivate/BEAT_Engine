@@ -221,3 +221,93 @@ end
     @test exact == 1 + 4 * 2.0^20
     @test OE.BeatEngineCoupled.DENSE_NORM_ESTIMATE_MARGIN * estimate < exact / 1e6   # margin does not cover it
 end
+
+# Step 2, field points / polars: propagation of the boundary-data bounds through the field.
+const OE_FIXTURES = joinpath(@__DIR__, "fixtures")
+const OE_FIELD_POINTS = [SVector(sin(t), 0.0, cos(t)) for t in range(0, pi; length=7)]
+
+@testset "field bound covers every boundary perturbation within the bounds" begin
+    mesh = load_gmsh22_with_tags(joinpath(OE_FIXTURES, "exterior_conforming.msh"), 0.001)
+    cache = build_field_evaluation_cache(mesh, triangle_rule(Float64, 2))
+    rng = MersenneTwister(11)
+    nodes = length(mesh.vertices); elements = length(mesh.faces)
+    k = 2pi * 2000 / 343
+    p = randn(rng, ComplexF64, nodes); q = randn(rng, ComplexF64, elements)
+    pb = 1e-3 .* rand(rng, nodes) .* abs.(p); qb = 1e-3 .* rand(rng, elements) .* abs.(q)
+    bound = galerkin_field_error_bound_cpu(OE_FIELD_POINTS, pb, qb, k, cache)
+    base = evaluate_galerkin_field_cpu(OE_FIELD_POINTS, mesh, p, q, k, cache)
+    scale = galerkin_field_error_bound_cpu(OE_FIELD_POINTS, abs.(p), abs.(q), k, cache)   # Σ|terms|
+    for trial in 1:20
+        # random phase, magnitude up to the bound; the last trial sits on the bound
+        dp = (trial == 20 ? pb : pb .* rand(rng, nodes)) .* cis.(2pi .* rand(rng, nodes))
+        dq = (trial == 20 ? qb : qb .* rand(rng, elements)) .* cis.(2pi .* rand(rng, elements))
+        moved = evaluate_galerkin_field_cpu(OE_FIELD_POINTS, mesh, p + dp, q + dq, k, cache)
+        @test all(abs.(moved - base) .<= bound .+ 1e-12 .* scale)
+    end
+    # a pressure bound on one node only: the field bound is the modulus of that node's contribution
+    single = zeros(nodes); single[1] = 1.0
+    unit = zeros(ComplexF64, nodes); unit[1] = 1.0
+    contribution = abs.(evaluate_galerkin_field_cpu(OE_FIELD_POINTS, mesh, unit, zeros(ComplexF64, elements), k, cache))
+    @test galerkin_field_error_bound_cpu(OE_FIELD_POINTS, single, zeros(elements), k, cache) >= contribution .* (1 - 1e-12)
+    @test all(isnan, galerkin_field_error_bound_cpu(OE_FIELD_POINTS, fill(NaN, nodes), qb, k, cache))
+    @test galerkin_field_error_bound_cpu(OE_FIELD_POINTS, zeros(nodes), zeros(elements), k, cache) == zeros(length(OE_FIELD_POINTS))
+end
+
+function oe_coupled(::Type{T}, f, env...) where {T}
+    fem = load_gmsh41_volume(joinpath(OE_FIXTURES, "femvolume.msh"), T(0.001))
+    bem = load_gmsh22_with_tags(joinpath(OE_FIXTURES, "exterior_conforming.msh"), T(0.001))
+    map = build_conforming_interface_map(fem, bem, physical_tag(fem, 2, "Interface"), 2)
+    radiator = physical_tag(fem, 2, "Radiator")
+    transducer = ElectrodynamicTransducer{T}("component:test", [radiator], T[1], [1], T[-1], SVector{3,T}(0, 0, 1),
+        T(2), 1, T(6), T(0.0005), T(7), T(0.015), T(0.0005), T(1))
+    system = withenv(env...) do
+        build_condensed_coupled_system(fem, bem, map, T(f), T(343), T(1.21); transducers=[transducer])
+    end
+    excitations = [(kind=:voltage, radiator_tag=0, transducer_index=1, amplitude=Complex{T}(1, 0)),
+                   (kind=:voltage, radiator_tag=0, transducer_index=1, amplitude=Complex{T}(0, 2))]
+    solutions = withenv(() -> solve_condensed_coupled_excitations(system, excitations), env...)
+    return system, solutions, bem
+end
+
+@testset "field estimates on the 2-kHz fixture cover the solver error; unknown without a bound" begin
+    common = ("BLAB_COUPLED_TRANSDUCER_CONDENSATION" => "1", "BLAB_COUPLED_INTERFACE_FLUX_ELIMINATION" => "1")
+    reference, reference_solutions, bem = oe_coupled(Float32, 2000.0, common...,
+        "BLAB_COUPLED_DENSE_REFINEMENT" => "0", "BLAB_COUPLED_DENSE_FLOAT64" => "1")
+    cache64 = build_field_evaluation_cache(load_gmsh22_with_tags(joinpath(OE_FIXTURES, "exterior_conforming.msh"), 0.001),
+                                           triangle_rule(Float64, reference.regular_quadrature_order))
+    mesh64 = load_gmsh22_with_tags(joinpath(OE_FIXTURES, "exterior_conforming.msh"), 0.001)
+    field64(x) = evaluate_galerkin_field_cpu(OE_FIELD_POINTS, mesh64, ComplexF64.(x.bem_pressure),
+                                             ComplexF64.(x.bem_neumann), Float64(reference.wavenumber), cache64)
+    try
+        for (split, solver) in (("auto", "lu"), ("0", "lu"), ("auto", "gmres"))
+            system, solutions, _ = oe_coupled(Float32, 2000.0, common..., "BLAB_COUPLED_DENSE_REFINEMENT" => "1",
+                "BLAB_COUPLED_DENSE_FLOAT64" => "0", "BLAB_COUPLED_DENSE_SPLIT" => split, "BLAB_COUPLED_DENSE_SOLVER" => solver)
+            try
+                fields = [evaluate_galerkin_field_cpu(OE_FIELD_POINTS, bem, x.bem_pressure, x.bem_neumann,
+                                                      system.wavenumber, system.field_cache) for x in solutions]
+                estimates = OE.field_output_error_estimates(system, OE_FIELD_POINTS, fields, system.field_cache)
+                @test size(estimates) == (length(OE_FIELD_POINTS), 2)
+                gmres = system.factorization isa OE.SplitGMRES && isnothing(system.factorization.fallback)
+                if gmres
+                    @test all(isnan, estimates)          # no componentwise bound: unknown
+                else
+                    @test all(e -> isfinite(e) && e >= sqrt(2) * eps(Float32) / 2, estimates)
+                    for j in 1:2
+                        truth = abs.(field64(solutions[j]) - field64(reference_solutions[j])) ./
+                                abs.(field64(reference_solutions[j]))
+                        @test all(estimates[:, j] .>= truth)
+                    end
+                end
+                @test_throws ArgumentError OE.field_output_error_estimates(system, OE_FIELD_POINTS, fields[1:1],
+                                                                           system.field_cache)
+                # a new solve of the factorization alone invalidates the stored bounds
+                system.factorization \ ones(ComplexF64, size(system.factorization, 1))
+                @test isnothing(OE.field_output_error_estimates(system, OE_FIELD_POINTS, fields, system.field_cache))
+            finally
+                release_condensed_coupled_system!(system)
+            end
+        end
+    finally
+        release_condensed_coupled_system!(reference)
+    end
+end
