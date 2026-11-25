@@ -167,6 +167,42 @@ with_baseline_cpu_coupled() do
                 release_condensed_coupled_system!(hfail)
             end
         end
+        # The tightest case at HMAT_TOL=1e-6 is the interface flux of BEM source 1 (pointwise ~7e-5 at an
+        # entry of ~0.7 % of the output's maximum, normwise ~1e-6). It is H-matrix compression error, not
+        # GMRES: tightening rtol 1e-9 -> 1e-12 leaves it unchanged, while the compression tolerance drives
+        # it down (measured tol 1e-6: 7.0e-5, 1e-8: 5.7e-8, 1e-10: 1.1e-9 with rtol 1e-12). Guard that the
+        # error converges with the H-matrix tolerance instead of sitting at a floor.
+        @testset "interface flux of BEM source 1 converges with the H-matrix tolerance (700 Hz)" begin
+            faces = length(bem.faces)
+            prescribed = sparse([1, 2, faces], [1, 1, 2], [1.0, -0.5, 2.0], faces, 2)
+            source = [(kind=:normal_velocity, fem_boundary_tags=Int[], fem_boundary_weights=Float64[],
+                       bem_source_index=1, amplitude=ComplexF64(1, 0))]
+            dense = build(700.0; transducers=[tr], prescribed_bem_normal_velocity=prescribed)
+            errors = Dict{Float64,Float64}()
+            try
+                reference = only(solve_condensed_coupled_excitations(dense, source))
+                for tol in (1e-6, 1e-8)
+                    solves = HMatCoupledSolve[]
+                    hsys = build(700.0; transducers=[tr], prescribed_bem_normal_velocity=prescribed,
+                        bem_solver=hmatrix_bem_solver(; tol=tol, rtol=1e-12, maxiter=600, solves=solves))
+                    try
+                        candidate = only(solve_condensed_coupled_excitations(hsys, source))
+                        @test all(s -> s.solved, only(solves).stats)
+                        e = hook_pointwise_error(reference.interface_flux, candidate.interface_flux)
+                        errors[tol] = e.relative
+                        @printf("    BEM source 1 interface_flux, tol %.0e, rtol 1e-12: pointwise %.2e  normwise %.2e\n",
+                            tol, e.relative, e.normwise)
+                    finally
+                        release_condensed_coupled_system!(hsys)
+                    end
+                end
+            finally
+                release_condensed_coupled_system!(dense)
+            end
+            @test errors[1e-6] < HOOK_BOUND
+            @test errors[1e-8] < 1e-6
+            @test errors[1e-8] < errors[1e-6] / 100
+        end
         @testset "Float32 systems are rejected" begin
             hook = hmatrix_bem_solver()
             @test_throws ErrorException hook((bem_mesh=bem, prepared=nothing, wavenumber=1.0, singular_order=1,
