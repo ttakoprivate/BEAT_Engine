@@ -21,38 +21,38 @@
     22
   ],
   "lease": {
-    "holder": "work25-15-mww6v02r",
-    "acquired_at": "2026-11-25T13:58:06.627Z",
-    "expires_at": "2026-11-25T15:28:06.627Z",
+    "holder": null,
+    "acquired_at": null,
+    "expires_at": null,
     "fencing_token": 21
   },
   "last_completed_run": {
-    "id": "work25-13-mww3ggfc",
-    "started_at": "2026-11-25T12:22:49.128Z",
-    "completed_at": "2026-11-25T12:38:12.911Z",
-    "status": "hmatrix_hook_cpu_contract_review_completed",
+    "id": "work25-15-mww6v02r",
+    "started_at": "2026-11-25T13:58:06.627Z",
+    "completed_at": "2026-11-25T14:08:38.239Z",
+    "status": "hmatrix_hook_followup_regressions_verified",
     "source_commit": "b34abee291207a13876068c99948d8ca386756fa",
     "checked_heads": {
       "9": "3d639cef853f6c60caa36fda4a8b39f28baec3f7",
       "14": "b2b756da7076cab3b32a63c822ec91af36a7e6ce",
       "19": "7afbaf4b3d88b1f15e39c12ab9a2a47473b336c9",
       "22": "d73eacc8eb21fa795377a2d808268b0348cd5179",
-      "23": "5ea59ac505e6c480131b4cbc13d7889001781b96"
+      "23": "baf8f3116f37de1685e5f7b6ddf64974c51e03b3"
     },
     "source_changes": false,
     "tests_rerun": true,
     "actions": [
       {
         "pr": 23,
-        "commit": "5ea59ac505e6c480131b4cbc13d7889001781b96",
-        "review_id": 6057721521,
-        "url": "https://github.com/ttakoprivate/BEAT_Engine/pull/23#pullrequestreview-6057721521",
+        "commit": "baf8f3116f37de1685e5f7b6ddf64974c51e03b3",
+        "review_id": 6059119957,
+        "url": "https://github.com/ttakoprivate/BEAT_Engine/pull/23#pullrequestreview-6059119957",
         "review_state": "COMMENTED"
       }
     ],
-    "evidence": "Fresh clone, official SHA256-verified Julia1.12.6, own depot, CPU instantiate and optional dependencies exit0. Official hmat_engine_hook_test87/87 + own34/34=121 pass,no skips/Broken,exit0. Verified vector/matrix/null RHS, scaled residual<=1e-9, forced maxiter1 throws FmmNotConvergedError column2 residual0.18072469061123356. Two spatial prescribed BEM sources with transducer solved vs same-kernel Float64 dense: max pointwise complex relative7.046964365e-5 interface_flux source1, all six outputs/excitations<1e-4. Neumann exactzeros1024/1026 absolute0Pa/m. Initial own syntax error exit1 corrected; subsequent3 own forward-norm assertions failed (observed4.5959166e-6, scaled residual5.8397339e-10) and replaced by promised scaled residual criterion, physical thresholds unchanged; final full rerun exit0. No baseline/repo edits, no fullreference/coupled/Python/Metal/CUDA/h343/performance qualification.",
+    "evidence": "Fresh clone, official SHA256-verified Julia1.12.6, own depot/optional environment. CPU instantiate+Pkg.add exit0. Unmodified hmat_engine_hook_test123/123 (87existing+36new),no skips/Broken,exit0. Followup only64 test lines; solver/baselines/tolerances unchanged. Prescribed sources six outputs pointwise<1e-4,max7.05e-5 interface_flux Q1, exactNeumannzeros1024/1026 abs0Pa/m. Matrix RHS zeros exact, scaled residuals7.76e-10/8.17e-10. Forced maxiter1 error columns[1,3], public solve propagates error. Clean source,no edits. Optional KA0.10.9 (previous0.10.8); FMM3D2.1.0,Krylov0.10.12,LinearMaps3.11.5,Adapt4.8.0. No fullreference/coupled/Python/GPU/h343/performance qualification.",
     "pending": [
-      "PR23 bounded5ea59ac review complete; suggest add forced nonconvergence and actual prescribed-source solve regressions. No blocker within tested CPU scope. Real compressed models, independent operator-reference, symmetry/walls H solver, Float32/hardware/switch/sweep remain open.",
+      "PR23 baf8f31 proposed nonconvergence/prescribed-source regressions now included and independently verified123/123; bounded follow-up complete, no new blocker. Same-kernel dense reference remains limited; compressed real models, independent operator reference, symmetry/walls H solver, Float32/hardware/switch/sweep open.",
       "PR22 field fixes confirmed atd73eacc;heuristic/h-mass-solve/fieldarithmetic/assembly/hardware limits remain.",
       "PR14 N1/N2b2b756d awaits independent follow-up;row-quadrature/adjoint review and h343 qualification open.",
       "PR19 numerical/export findings and owner split/merge decision open;three ROM fixes verified.",
