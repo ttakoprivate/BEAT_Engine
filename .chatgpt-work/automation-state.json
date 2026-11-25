@@ -21,38 +21,38 @@
     22
   ],
   "lease": {
-    "holder": "work25-21-mwwjwo61",
-    "acquired_at": "2026-11-25T20:03:19.513Z",
-    "expires_at": "2026-11-25T21:47:42.884Z",
+    "holder": null,
+    "acquired_at": null,
+    "expires_at": null,
     "fencing_token": 24
   },
   "last_completed_run": {
-    "id": "work25-19-mwwfglj9",
-    "started_at": "2026-11-25T17:58:51.141Z",
-    "completed_at": "2026-11-25T18:00:46.196Z",
-    "status": "pending_tolerance_review_published_after_connector_recovery",
+    "id": "work25-21-mwwjwo61",
+    "started_at": "2026-11-25T20:03:19.513Z",
+    "completed_at": "2026-11-25T20:23:37.247Z",
+    "status": "external_interface_replay_review_changes_requested",
     "source_commit": "b34abee291207a13876068c99948d8ca386756fa",
     "checked_heads": {
       "9": "3d639cef853f6c60caa36fda4a8b39f28baec3f7",
       "14": "b2b756da7076cab3b32a63c822ec91af36a7e6ce",
       "19": "7afbaf4b3d88b1f15e39c12ab9a2a47473b336c9",
       "22": "d73eacc8eb21fa795377a2d808268b0348cd5179",
-      "23": "8b8dcf13308947f75d00f33fba20b3622cf6bfa2"
+      "23": "a2b222e8fa5e36998cb7be1a9bc25eccf8421153"
     },
     "source_changes": false,
-    "tests_rerun": false,
+    "tests_rerun": true,
     "actions": [
       {
         "pr": 23,
-        "commit": "8b8dcf13308947f75d00f33fba20b3622cf6bfa2",
-        "review_id": 6062513377,
-        "url": "https://github.com/ttakoprivate/BEAT_Engine/pull/23#pullrequestreview-6062513377",
-        "review_state": "COMMENTED"
+        "commit": "a2b222e8fa5e36998cb7be1a9bc25eccf8421153",
+        "review_id": 6064421809,
+        "url": "https://github.com/ttakoprivate/BEAT_Engine/pull/23#pullrequestreview-6064421809",
+        "review_state": "CHANGES_REQUESTED"
       }
     ],
-    "evidence": "Recovered after expired fencing22 lease and prior MCP-32603/ReadTimeout publication failures. Fresh isolated cloneT1759 unchanged8b8dcf1,only36 addedtest lines,clean status/diff/diffcheck exit0. No tests repeated this run; delivered actual prior Nov25 T1558 CPU run: own officialSHA256Julia1.12.6,depot+optionalenv,instantiate exit0;unmodified hmat_engine_hook_test128/128,no skips/Broken,exit0. New fixedrtol1e-12 maxiter600 Htol1e-6->1e-8 source1interfaceflux pointwise6.97e-5->5.65e-8,about1230x. Standard Q1/Q2 allsixoutputs previouslydocumented confirmed,Neumann1024/1026 exactzeros abs0Pa/m. Fullscan/index45 notverified. No independentoperator/fullreference/coupled/Python/GPU/h343/performance qualification. Review6062513377 stored and readback verified.",
+    "evidence": "Fresh cloneT2003,officialSHA256Julia1.12.6,new own depot+optionalenv,instantiate exit0. Combined unchanged hmat153 +external metric4+357 + own algebra11+exteriorfailure5=530passed,exit0,no skips/Broken. Independent reference_tests4394/4394,61 testsets,exit0,no skips/Broken;total4924. Own algebra validates minusCflux and exteriorA solve,sourceorder,empty/other traces,0 absolute algebraerror. Forced exterior maxiter1 throws columns[2,3],residuals0.1914386422/0.1929649423,nulliterate exact0. Source1/2 replay pressures and normal derivatives maxpointwise<=1.27e-6;2255/2258 Neumannzero entries absolute0Pa/m. P2 reproduced current remainder test skips pointwise criteria: Neumann pointwise5/2.828427/4.472136 despite normalized maxima~1e-12;maxabsolute7.916929e-10/6.029662e-10/9.275109e-10Pa/m;exactzero errors5.684342e-14/2.842171e-14/5.684342e-14Pa/m. Pressure remainder pointwise4.049291e-7/4.049292e-7/1.367863e-6,abs1.024891e-8/7.805333e-9/1.647395e-8Pa. Not500% totalfield error; require pointwise+absolute/unit reporting and explicit qualification limits,notwidenbaseline. Sourceclean,no edits;no independentlyassembled Hreplay/GPU/h343/performance qualification. Lease renewed viaCAS during long gate.",
     "pending": [
-      "PR23 8b8dcf1 tolerance regression independently verified128/128 in prior T1558 run; report now delivered in review6062513377 after recovery. No new blocker. Same-kernel comparison limited; real compressed models, independent operator reference, symmetry/walls H solver, Float32/hardware/switch/sweep remain open.",
+      "PR23 a2b222e REQUEST_CHANGES6064421809: new replay signs/contract/exteriorfailure verified; fix remainder reporting/test criterion in hmat_engine_hook_test229-238 and external_bem_solver_tests246-256. Add pointwise relative and absolute/unit null metrics; current normalizedtotalmax is not replacement. Large ratios in tiny/cancelled entries not large totalfielderror. Other H solver/runtime/hardware qualifications remain open.",
       "PR22 field fixes confirmed atd73eacc;heuristic/h-mass-solve/fieldarithmetic/assembly/hardware limits remain.",
       "PR14 N1/N2b2b756d awaits independent follow-up;row-quadrature/adjoint review and h343 qualification open.",
       "PR19 numerical/export findings and owner split/merge decision open;three ROM fixes verified.",
