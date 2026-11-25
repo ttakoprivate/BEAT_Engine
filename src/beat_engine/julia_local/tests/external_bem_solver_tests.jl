@@ -49,6 +49,34 @@ function pointwise_complex_error(reference, candidate)
             scale=maximum(abs, r; init=0.0))
 end
 
+# Remainder column of `interface_radiation_traces` (total output minus the interface traces). It is a
+# subtraction, so some reference entries are only its rounding residue. Report both scales
+# (REVIEW-23-a2b222e): the pointwise complex relative error over all nonzero entries and the maximum
+# absolute error in the output's unit. Acceptance splits the entries at `cancellation * total_scale`:
+# entries at or above it are checked pointwise; entries below it (rounding residue and exact zeros) get
+# a separate absolute bound against the total output's largest magnitude. Neither replaces the other.
+function remainder_complex_error(reference, candidate, total_scale; cancellation=1e-12)
+    r = ComplexF64.(vec(reference)); c = ComplexF64.(vec(candidate))
+    length(r) == length(c) || error("Output lengths differ: $(length(r)) vs $(length(c)).")
+    err = abs.(c .- r)
+    nonzero = .!iszero.(r)
+    significant = abs.(r) .>= cancellation * total_scale
+    return (relative=maximum(err[nonzero] ./ abs.(r[nonzero]); init=0.0),
+            relative_significant=maximum(err[significant] ./ abs.(r[significant]); init=0.0),
+            significant_count=count(significant), residue_count=count(nonzero .& .!significant),
+            zero_count=count(!, nonzero), absolute=maximum(err; init=0.0),
+            absolute_at_zero=maximum(err[.!nonzero]; init=0.0),
+            absolute_residue=maximum(err[.!significant]; init=0.0), total_scale=total_scale)
+end
+
+function print_remainder_error(io, label, e, unit)
+    println(io, "  ", label, ": pointwise all nonzero ", e.relative, ", pointwise significant (", e.significant_count,
+            " entries >= 1e-12 max|total|) ", e.relative_significant, ", max abs ", e.absolute, " ", unit,
+            "; residue entries ", e.residue_count, ", exact zeros ", e.zero_count, ", max abs on residue/zeros ",
+            e.absolute_residue, " ", unit, " (at zeros ", e.absolute_at_zero, " ", unit, "), max |total| ",
+            e.total_scale, " ", unit)
+end
+
 const OUTPUT_UNITS = Dict(:fem_pressure => "Pa", :bem_pressure => "Pa", :bem_neumann => "Pa/m",
     :interface_flux => "Pa/m", :diaphragm_velocity => "m/s", :voice_coil_current => "A")
 
@@ -97,6 +125,19 @@ shifted_volume_mesh(m, d) = typeof(m)(m.vertices .+ Ref(d), m.tetrahedra, m.tetr
     @test e.relative == 0.0 && e.absolute_at_zero ≈ 2e-3 && e.zero_count == 2
     @test pointwise_complex_error(zeros(ComplexF64, 3), zeros(ComplexF64, 3)) ==
           (relative=0.0, absolute_at_zero=0.0, zero_count=3, scale=0.0)
+end
+
+@testset "remainder metric (REVIEW-23-a2b222e)" begin
+    # Counterexample from the review: a residue entry with a large pointwise error is reported, not hidden.
+    reference = ComplexF64[2, 1e-14, 0, -1]
+    candidate = ComplexF64[2 * (1 + 1e-9), 5e-14, 3e-14, -1]
+    e = remainder_complex_error(reference, candidate, 2.0)
+    @test isapprox(e.relative, 4.0; rtol=1e-6) && isapprox(e.relative_significant, 1e-9; rtol=1e-6)
+    @test e.significant_count == 2 && e.residue_count == 1 && e.zero_count == 1
+    @test isapprox(e.absolute, 2e-9; rtol=1e-6) && isapprox(e.absolute_residue, 4e-14; rtol=1e-6) && e.absolute_at_zero == 3e-14
+    # A large relative error on a significant entry fails the pointwise part despite a tiny normalized error.
+    bad = remainder_complex_error(ComplexF64[1, 1e-6], ComplexF64[1, 2e-6], 1.0)
+    @test bad.relative_significant ≈ 1.0 && bad.absolute / bad.total_scale ≈ 1e-6
 end
 
 with_baseline_cpu_coupled() do
@@ -244,15 +285,17 @@ with_baseline_cpu_coupled() do
                             @test size(tc.pressure) == size(tr.pressure)
                             for source in axes(tr.pressure, 2)
                                 if include_other && source == size(tr.pressure, 2)
-                                    # The remainder column is a difference (total minus interface traces):
-                                    # with no other source it is rounding noise, so it is bounded in
-                                    # absolute terms against the total output's largest magnitude.
-                                    dp = maximum(abs, tc.pressure[:, source] .- tr.pressure[:, source]) / maximum(abs, r.bem_pressure)
-                                    dn = maximum(abs, tc.normal_derivative[:, source] .- tr.normal_derivative[:, source]) /
-                                         max(maximum(abs, r.bem_neumann), floatmin(Float64))
-                                    println("  $name excitation $column remainder: max abs error / max |total| ",
-                                            "pressure $dp, normal derivative $dn")
-                                    @test dp < 1e-10 && dn < 1e-10
+                                    # Remainder column: pointwise and absolute, see remainder_complex_error.
+                                    ep = remainder_complex_error(tr.pressure[:, source], tc.pressure[:, source],
+                                        maximum(abs, r.bem_pressure))
+                                    en = remainder_complex_error(tr.normal_derivative[:, source], tc.normal_derivative[:, source],
+                                        max(maximum(abs, r.bem_neumann), floatmin(Float64)))
+                                    print_remainder_error(stdout, "$name excitation $column remainder pressure", ep, "Pa")
+                                    print_remainder_error(stdout, "$name excitation $column remainder normal derivative", en, "Pa/m")
+                                    @test ep.relative_significant < 1e-10 && en.relative_significant < 1e-10
+                                    @test ep.absolute_residue <= 1e-10 * ep.total_scale
+                                    @test en.absolute_residue <= 1e-10 * en.total_scale
+                                    @test ep.absolute <= 1e-10 * ep.total_scale && en.absolute <= 1e-10 * en.total_scale
                                     continue
                                 end
                                 ep = pointwise_complex_error(tr.pressure[:, source], tc.pressure[:, source])

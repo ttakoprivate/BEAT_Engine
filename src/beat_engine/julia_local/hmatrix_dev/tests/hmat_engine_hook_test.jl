@@ -26,6 +26,34 @@ function hook_pointwise_error(reference, candidate)
      absolute_at_zero=maximum(abs.(c[.!nz]); init=0.0), zero_count=count(!, nz), scale=maximum(abs, r; init=0.0))
 end
 
+# Remainder column of `interface_radiation_traces` (total output minus the interface traces). It is a
+# subtraction, so some reference entries are only its rounding residue. Report both scales
+# (REVIEW-23-a2b222e): the pointwise complex relative error over all nonzero entries and the maximum
+# absolute error in the output's unit. Acceptance splits the entries at `cancellation * total_scale`:
+# entries at or above it are checked pointwise; entries below it (rounding residue and exact zeros) get
+# a separate absolute bound against the total output's largest magnitude. Neither replaces the other.
+function hook_remainder_error(reference, candidate, total_scale; cancellation=1e-12)
+    r = ComplexF64.(vec(reference)); c = ComplexF64.(vec(candidate))
+    length(r) == length(c) || error("Output lengths differ: $(length(r)) vs $(length(c)).")
+    err = abs.(c .- r)
+    nonzero = .!iszero.(r)
+    significant = abs.(r) .>= cancellation * total_scale
+    return (relative=maximum(err[nonzero] ./ abs.(r[nonzero]); init=0.0),
+            relative_significant=maximum(err[significant] ./ abs.(r[significant]); init=0.0),
+            significant_count=count(significant), residue_count=count(nonzero .& .!significant),
+            zero_count=count(!, nonzero), absolute=maximum(err; init=0.0),
+            absolute_at_zero=maximum(err[.!nonzero]; init=0.0),
+            absolute_residue=maximum(err[.!significant]; init=0.0), total_scale=total_scale)
+end
+
+function print_hook_remainder_error(io, label, e, unit)
+    println(io, "  ", label, ": pointwise all nonzero ", e.relative, ", pointwise significant (", e.significant_count,
+            " entries >= 1e-12 max|total|) ", e.relative_significant, ", max abs ", e.absolute, " ", unit,
+            "; residue entries ", e.residue_count, ", exact zeros ", e.zero_count, ", max abs on residue/zeros ",
+            e.absolute_residue, " ", unit, " (at zeros ", e.absolute_at_zero, " ", unit, "), max |total| ",
+            e.total_scale, " ", unit)
+end
+
 const HOOK_OUTPUTS = (:fem_pressure, :bem_pressure, :bem_neumann, :interface_flux, :diaphragm_velocity, :voice_coil_current)
 const HOOK_TOL = parse(Float64, get(ENV, "HMAT_TOL", "1e-6"))
 # Acceptance bound for this fixture at HMAT_TOL=1e-6 and GMRES rtol 1e-9 (pointwise, every output).
@@ -227,14 +255,16 @@ with_baseline_cpu_coupled() do
                     @test size(t_h.pressure) == size(t_ref.pressure) == (length(r.bem_pressure), 3)
                     for source in axes(t_ref.pressure, 2)
                         if source == size(t_ref.pressure, 2)
-                            # Remainder column (total minus interface traces): a cancellation difference,
-                            # bounded in absolute terms against the total output's largest magnitude.
-                            dp = maximum(abs, t_h.pressure[:, source] .- t_ref.pressure[:, source]) / maximum(abs, r.bem_pressure)
-                            dn = maximum(abs, t_h.normal_derivative[:, source] .- t_ref.normal_derivative[:, source]) /
-                                 max(maximum(abs, r.bem_neumann), floatmin(Float64))
-                            @printf("    replay excitation %d remainder: max abs error / max |total| pressure %.2e, normal derivative %.2e\n",
-                                column, dp, dn)
-                            @test dp < HOOK_BOUND && dn < HOOK_BOUND
+                            # Remainder column: pointwise and absolute, see hook_remainder_error.
+                            ep = hook_remainder_error(t_ref.pressure[:, source], t_h.pressure[:, source],
+                                maximum(abs, r.bem_pressure))
+                            en = hook_remainder_error(t_ref.normal_derivative[:, source], t_h.normal_derivative[:, source],
+                                max(maximum(abs, r.bem_neumann), floatmin(Float64)))
+                            print_hook_remainder_error(stdout, "replay excitation $column remainder pressure", ep, "Pa")
+                            print_hook_remainder_error(stdout, "replay excitation $column remainder normal derivative", en, "Pa/m")
+                            @test ep.relative_significant < HOOK_BOUND && en.relative_significant < HOOK_BOUND
+                            @test ep.absolute_residue <= HOOK_BOUND * ep.total_scale
+                            @test en.absolute_residue <= HOOK_BOUND * en.total_scale
                             continue
                         end
                         ep = hook_pointwise_error(t_ref.pressure[:, source], t_h.pressure[:, source])
