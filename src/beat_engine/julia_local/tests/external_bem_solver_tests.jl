@@ -31,22 +31,67 @@ function dense_hook_solver(calls::Ref{Int}, rests::Vector{Any})
     end
 end
 
-complex_relative_error(reference, candidate) = begin
-    r = ComplexF64.(reference); c = ComplexF64.(candidate)
-    scale = maximum(abs, r; init=0.0)
-    scale == 0 ? maximum(abs, c; init=0.0) : maximum(abs, c .- r; init=0.0) / scale
+# Acceptance metric (roadmap): pointwise complex relative error |c - r| / |r| over the nonzero
+# reference entries; exact reference zeros are reported separately as an absolute error in the
+# output's unit. A normalized maximum would hide a large error at a small entry (REVIEW-23-51d94c1).
+function pointwise_complex_error(reference, candidate)
+    r = ComplexF64.(vec(reference)); c = ComplexF64.(vec(candidate))
+    length(r) == length(c) || error("Output lengths differ: $(length(r)) vs $(length(c)).")
+    nonzero = .!iszero.(r)
+    relative = maximum(abs.(c[nonzero] .- r[nonzero]) ./ abs.(r[nonzero]); init=0.0)
+    absolute_at_zero = maximum(abs.(c[.!nonzero]); init=0.0)
+    return (relative=relative, absolute_at_zero=absolute_at_zero, zero_count=count(!, nonzero),
+            scale=maximum(abs, r; init=0.0))
 end
 
+const OUTPUT_UNITS = Dict(:fem_pressure => "Pa", :bem_pressure => "Pa", :bem_neumann => "Pa/m",
+    :interface_flux => "Pa/m", :diaphragm_velocity => "m/s", :voice_coil_current => "A")
+
 function compare_solutions(reference, candidate)
-    worst = Dict{Symbol,Float64}()
+    worst = Dict{Symbol,Any}()
     for name in propertynames(reference)
         value = getproperty(reference, name)
         value isa AbstractArray{<:Number} || continue
         eltype(value) <: Complex || eltype(value) <: AbstractFloat || continue
         hasproperty(candidate, name) || continue
-        worst[name] = complex_relative_error(value, getproperty(candidate, name))
+        worst[name] = pointwise_complex_error(value, getproperty(candidate, name))
     end
     return worst
+end
+
+# Every output and excitation: pointwise relative error below `tolerance`, and at exact reference
+# zeros an absolute error below `tolerance` times the output's largest reference magnitude.
+function check_solutions(label, references, candidates; tolerance=1e-10)
+    @test length(references) == length(candidates)
+    for (column, (r, c)) in enumerate(zip(references, candidates))
+        worst = compare_solutions(r, c)
+        @test !isempty(worst)
+        for (output, e) in sort(collect(worst); by=first)
+            unit = get(OUTPUT_UNITS, output, "")
+            println("  $label excitation $column $output: max pointwise complex relative error $(e.relative)",
+                    e.zero_count > 0 ? "; $(e.zero_count) exact reference zeros, max absolute error $(e.absolute_at_zero) $unit" : "")
+            @test e.relative < tolerance
+            @test e.absolute_at_zero <= tolerance * max(e.scale, floatmin(Float64))
+        end
+    end
+end
+
+# Shifts a mesh as a whole (normals unchanged) so a symmetry fixture lies in the positive half-space.
+shifted_boundary_mesh(m::BoundaryMesh, d) = BoundaryMesh(m.vertices .+ Ref(d), m.faces, m.physical_tags,
+    m.centroids .+ Ref(d), m.normals, m.areas, [map(v -> v + d, f) for f in m.face_vertices])
+shifted_volume_mesh(m, d) = typeof(m)(m.vertices .+ Ref(d), m.tetrahedra, m.tetra_physical_tags, m.boundary_faces,
+    m.boundary_physical_tags, m.physical_names, m.quadratic_tetrahedra, m.quadratic_boundary_faces)
+
+@testset "pointwise metric (REVIEW-23-51d94c1)" begin
+    # A large error at a small entry is not hidden by the largest entry.
+    @test pointwise_complex_error(ComplexF64[1, 1e-12], ComplexF64[1, 2e-12]).relative ≈ 1.0
+    # Phase reversal: 0 dB level difference, complex error 2.
+    @test pointwise_complex_error(ComplexF64[1, -1], ComplexF64[-1, 1]).relative ≈ 2.0
+    # Mixed zero / nonzero reference: zeros go to the absolute error, not into a division.
+    e = pointwise_complex_error(ComplexF64[0, 2, 0], ComplexF64[1e-3, 2, -2e-3im])
+    @test e.relative == 0.0 && e.absolute_at_zero ≈ 2e-3 && e.zero_count == 2
+    @test pointwise_complex_error(zeros(ComplexF64, 3), zeros(ComplexF64, 3)) ==
+          (relative=0.0, absolute_at_zero=0.0, zero_count=3, scale=0.0)
 end
 
 with_baseline_cpu_coupled() do
@@ -76,6 +121,8 @@ with_baseline_cpu_coupled() do
                 try
                     @test dense.bem_solver == :dense
                     @test external.bem_solver == :external
+                    @test dense.coupled_bem_assembly == :operators
+                    @test external.coupled_bem_assembly == :external
                     @test calls[] == 1
                     @test length(rests) == 1
                     rest = only(rests).rest; layout = only(rests).layout
@@ -86,14 +133,7 @@ with_baseline_cpu_coupled() do
                     @test external.interface_elimination == :none
                     reference = solve_condensed_coupled_excitations(dense, case.excitations)
                     candidate = solve_condensed_coupled_excitations(external, case.excitations)
-                    for (column, (r, c)) in enumerate(zip(reference, candidate))
-                        worst = compare_solutions(r, c)
-                        @test !isempty(worst)
-                        for (output, err) in sort(collect(worst); by=first)
-                            println("  $(case.name) excitation $column $(output): max complex relative error $(err)")
-                            @test err < 1e-10
-                        end
-                    end
+                    check_solutions(case.name, reference, candidate)
                 finally
                     release_condensed_coupled_system!(dense)
                     release_condensed_coupled_system!(external)
@@ -109,11 +149,9 @@ with_baseline_cpu_coupled() do
                 try
                     @test external.interface_elimination == :none
                     @test any(occursin("external BEM solver", reason) for reason in external.optimization_fallback_reasons)
-                    r = only(solve_condensed_coupled_excitations(dense, [voltage]))
-                    c = only(solve_condensed_coupled_excitations(external, [voltage]))
-                    for (output, err) in compare_solutions(r, c)
-                        @test err < 1e-9
-                    end
+                    check_solutions("flux elimination requested",
+                        solve_condensed_coupled_excitations(dense, [voltage, voltage_b]),
+                        solve_condensed_coupled_excitations(external, [voltage, voltage_b]); tolerance=1e-9)
                 finally
                     release_condensed_coupled_system!(dense)
                     release_condensed_coupled_system!(external)
@@ -128,10 +166,48 @@ with_baseline_cpu_coupled() do
             external = build(700.0; prescribed_bem_normal_velocity=prescribed, bem_solver=dense_hook_solver(Ref(0), Any[]))
             try
                 @test size(external.prescribed_bem_rhs) == size(dense.prescribed_bem_rhs) == (length(bem_mesh.vertices), 2)
-                @test complex_relative_error(dense.prescribed_bem_rhs, external.prescribed_bem_rhs) < 1e-12
+                e = pointwise_complex_error(dense.prescribed_bem_rhs, external.prescribed_bem_rhs)
+                @test e.relative < 1e-12 && e.absolute_at_zero <= 1e-12 * e.scale
+                # Actual solves of prescribed BEM excitations, not only the right-hand side.
+                sources = [(kind=:normal_velocity, fem_boundary_tags=Int[], fem_boundary_weights=Float64[],
+                            bem_source_index=1, amplitude=ComplexF64(1, 0)),
+                           (kind=:normal_velocity, fem_boundary_tags=Int[], fem_boundary_weights=Float64[],
+                            bem_source_index=2, amplitude=ComplexF64(-0.4, 0.9))]
+                check_solutions("prescribed BEM velocity", solve_condensed_coupled_excitations(dense, sources),
+                    solve_condensed_coupled_excitations(external, sources))
             finally
                 release_condensed_coupled_system!(dense)
                 release_condensed_coupled_system!(external)
+            end
+        end
+
+        # Symmetry, wall impedance and thermoviscous walls (cases from REVIEW-23-51d94c1). The coupled
+        # fixture is shifted as a whole into the positive half-space: an algebraic contract fixture.
+        shift = SVector(0.3, 0.3, 0.0)
+        fem_s = shifted_volume_mesh(fem_mesh, shift)
+        bem_s = shifted_boundary_mesh(bem_mesh, shift)
+        map_s = build_conforming_interface_map(fem_s, bem_s, physical_tag(fem_s, 2, "Interface"), 2)
+        wall_tag = physical_tag(fem_s, 2, "Volume_boundary")
+        build_s(; extra...) = build_condensed_coupled_system(fem_s, bem_s, map_s, 700.0, 343.0, 1.21;
+            quadrature_order=CONDENSED_QUADRATURE_ORDER, singular_order=CONDENSED_SINGULAR_ORDER, bem_backend=:cpu,
+            transducers=[transducer], extra...)
+        for (name, extra) in (
+            ("symmetry x", (symmetry_mode=:x,)),
+            ("symmetry xy", (symmetry_mode=:xy,)),
+            ("wall impedance", (wall_impedances=[(tag=wall_tag, thickness_m=0.02, flow_resistivity_pa_s_per_m2=12000.0)],)),
+            ("thermoviscous wall", (thermoviscous_walls=[(tag=wall_tag, boundary_id="boundary:wall")],)),
+        )
+            @testset "$name" begin
+                dense = build_s(; extra...)
+                external = build_s(; extra..., bem_solver=dense_hook_solver(Ref(0), Any[]))
+                try
+                    @test external.bem_solver == :external
+                    check_solutions(name, solve_condensed_coupled_excitations(dense, [voltage, voltage_b]),
+                        solve_condensed_coupled_excitations(external, [voltage, voltage_b]))
+                finally
+                    release_condensed_coupled_system!(dense)
+                    release_condensed_coupled_system!(external)
+                end
             end
         end
 

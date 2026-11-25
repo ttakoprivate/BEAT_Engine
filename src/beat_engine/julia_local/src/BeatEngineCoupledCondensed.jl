@@ -2209,16 +2209,17 @@ function build_condensed_coupled_system(
         error("Coupled cache retained FEM vertices do not match the current moving surfaces.")
 
     # Flux-carrying DP0 faces: only these C columns are ever multiplied by a nonzero flux.
-    active_flux_columns = if prepared.bem_backend == :metal && _metal_compact_flux_enabled()
+    active_flux_columns = if isnothing(bem_solver) && prepared.bem_backend == :metal && _metal_compact_flux_enabled()
         motion_map = isempty(transducers) ? nothing : resolved_transducer_operators.bem_normal_velocity
         _active_flux_rows(prepared.dp0.global_dof_count, prepared.interface_operators.bem_flux, motion_map,
                           prescribed_bem_normal_velocity)
     else
         nothing
     end
-    assembly_plan, combined_identity = _condensed_bem_assembly_plan(
+    # An external BEM solver assembles nothing densely: no combined-assembly plan, no device identity cache.
+    assembly_plan, combined_identity = isnothing(bem_solver) ? _condensed_bem_assembly_plan(
         condensed_cache, prepared, T, selected_quadrature_order; active_columns=active_flux_columns,
-    )
+    ) : ((mode=:external, fallback_reason=nothing), nothing)
     assembly_plan.fallback_reason === nothing || push!(optimization_fallbacks,
         "combined Metal BEM assembly not used: " * assembly_plan.fallback_reason)
 
