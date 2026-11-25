@@ -21,40 +21,42 @@
     22
   ],
   "lease": {
-    "holder": "work25-09-mwvu8md2",
-    "acquired_at": "2026-11-25T08:04:47.030Z",
-    "expires_at": "2026-11-25T09:34:47.030Z",
+    "holder": null,
+    "acquired_at": null,
+    "expires_at": null,
     "fencing_token": 18
   },
   "last_completed_run": {
-    "id": "work24-20-mwv29gxo",
-    "started_at": "2026-11-24T19:01:37.404Z",
-    "completed_at": "2026-11-24T19:08:50.683Z",
-    "status": "field_diagnostic_two_fixes_verified",
+    "id": "work25-09-mwvu8md2",
+    "started_at": "2026-11-25T08:04:47.030Z",
+    "completed_at": "2026-11-25T08:14:14.111Z",
+    "status": "external_bem_contract_review_metric_correction_requested",
     "source_commit": "b34abee291207a13876068c99948d8ca386756fa",
     "checked_heads": {
       "9": "3d639cef853f6c60caa36fda4a8b39f28baec3f7",
       "14": "b2b756da7076cab3b32a63c822ec91af36a7e6ce",
       "19": "7afbaf4b3d88b1f15e39c12ab9a2a47473b336c9",
-      "22": "d73eacc8eb21fa795377a2d808268b0348cd5179"
+      "22": "d73eacc8eb21fa795377a2d808268b0348cd5179",
+      "23": "51d94c1a1739fe44ab8ef03f50191024010fade7"
     },
     "source_changes": false,
     "tests_rerun": true,
     "actions": [
       {
-        "pr": 22,
-        "commit": "d73eacc8eb21fa795377a2d808268b0348cd5179",
-        "review_id": 6045615700,
-        "url": "https://github.com/ttakoprivate/BEAT_Engine/pull/22#pullrequestreview-6045615700",
-        "review_state": "COMMENTED"
+        "pr": 23,
+        "commit": "51d94c1a1739fe44ab8ef03f50191024010fade7",
+        "review_id": 6053962095,
+        "url": "https://github.com/ttakoprivate/BEAT_Engine/pull/23#pullrequestreview-6053962095",
+        "review_state": "CHANGES_REQUESTED"
       }
     ],
-    "evidence": "Fresh isolated clone; new official SHA256 verified Julia1.12.6, own depot, instantiate exit0. Output tests375/375;18 own checks (16 flux reconstruction bounds/input nonmutation/unknown missing or wrong-shaped h, across dense/block and Float32/Float64;2 original near-point checks). Total393 passed,no skips/Broken,exit0. Original synthetic flux trueError5820.460492503131 now bound94205.55304529825 Float32,94205.54752102653 Float64,both paths. Original Float32 query now bound1335088.428860218 vs actual1335088.4. Source clean/no edits. Both specific repairs confirmed via COMMENT review; no general accuracy guarantee. No full reference gate, split/coupled/Python/independent physical reference/GPU/performance rerun.",
+    "evidence": "Fresh clone own official SHA256 verified Julia1.12.6/depot, instantiate exit0. New external hook suite71/71;own metric counterexample2/2;four CPU cases symmetryx/xy,wallimpedance,thermoviscous,each2voltages/sixoutputs:100/100,maximum pointwise complex relative0 every output/excitation,1026 exact BEM-Neumann zeros/case/excitation abs0Pa/m. Total173 passed,no skips/Broken,successful harness exit0. Initial harness exit1 after73 passed because fixture negativeX invalidforsymmetry;correctly rejected,then translated BOTH meshes by(0.3,0.3,0)m and reran. Reproduced weak testmetric:ref[1,1e-12],candidate[1,2e-12],old1e-12 vs pointwise1.0;P2 REQUEST_CHANGES at tests/external_bem_solver_tests.jl34-37. CPU signs/layout/wall contract confirmed, no hooksolutionbug found. Source clean. No full reference gate/coupled530/Python/GPU/performance tests. Shell initial diff base ref absent until fetched; no sourcechanges.",
     "pending": [
-      "PR22 two prior field diagnostic findings fixed and independently verified atd73eacc. Diagnostic remains heuristic; h mass-solve error, field-kernel arithmetic, assembly and h343 hardware qualification remain outside this bounded verification.",
-      "PR14 N1/N2 follow-upb2b756d awaits further independent review; row-quadrature/adjoint review and h343 qualification remain open.",
-      "PR19 numerical/export findings and owner merge-splitting decision remain open; three ROM protocol fixes previously verified.",
-      "Issue12 awaits VACS sample/format answers; PR17 merged; PR9 roadmap update planned by author."
+      "PR23 head51d94c1 targethmatrixdev: replace normed-max helper with pointwise complex relative/nonzero and absolute exact-zero criteria; add regression. New CPU symmetry/wall checks positive; missing prescribed-source solve,Float32/switch,realMetal combinations suggested. Metal assembly-plan prep still before hook,source-only note,no hardwarebug claimed.",
+      "PR22 prior field findings fixed and verified atd73eacc;heuristic,h-mass-solve,fieldarithmetic,assembly/hardware limits remain.",
+      "PR14 N1/N2b2b756d awaits independent follow-up;full row-quadrature/adjoint review and h343 qualification open.",
+      "PR19 numerical/export findings and owner split/merge decision open;three ROM fixes verified.",
+      "Issue12 VACS sample/format answers pending;PR17 merged;PR9 roadmap update planned."
     ],
     "continuation": "Continue only new or independently actionable assigned work/reviews. Do not repeat unchanged findings, acknowledgments or owner questions. Normal external data/review/hardware waits do not pause automation."
   },
