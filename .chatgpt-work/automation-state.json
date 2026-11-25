@@ -21,38 +21,38 @@
     22
   ],
   "lease": {
-    "holder": "work25-22-mwwm35py",
-    "acquired_at": "2026-11-25T21:04:21.430Z",
-    "expires_at": "2026-11-25T22:34:21.430Z",
+    "holder": null,
+    "acquired_at": null,
+    "expires_at": null,
     "fencing_token": 25
   },
   "last_completed_run": {
-    "id": "work25-21-mwwjwo61",
-    "started_at": "2026-11-25T20:03:19.513Z",
-    "completed_at": "2026-11-25T20:23:37.247Z",
-    "status": "external_interface_replay_review_changes_requested",
+    "id": "work25-22-mwwm35py",
+    "started_at": "2026-11-25T21:04:21.430Z",
+    "completed_at": "2026-11-25T21:16:36.339Z",
+    "status": "remainder_reporting_followup_verified",
     "source_commit": "b34abee291207a13876068c99948d8ca386756fa",
     "checked_heads": {
       "9": "3d639cef853f6c60caa36fda4a8b39f28baec3f7",
       "14": "b2b756da7076cab3b32a63c822ec91af36a7e6ce",
       "19": "7afbaf4b3d88b1f15e39c12ab9a2a47473b336c9",
       "22": "d73eacc8eb21fa795377a2d808268b0348cd5179",
-      "23": "a2b222e8fa5e36998cb7be1a9bc25eccf8421153"
+      "23": "01ccb01ca0bdba2233237640a5f12f01293d75f6"
     },
     "source_changes": false,
     "tests_rerun": true,
     "actions": [
       {
         "pr": 23,
-        "commit": "a2b222e8fa5e36998cb7be1a9bc25eccf8421153",
-        "review_id": 6064421809,
-        "url": "https://github.com/ttakoprivate/BEAT_Engine/pull/23#pullrequestreview-6064421809",
-        "review_state": "CHANGES_REQUESTED"
+        "commit": "01ccb01ca0bdba2233237640a5f12f01293d75f6",
+        "review_id": 6065092992,
+        "url": "https://github.com/ttakoprivate/BEAT_Engine/pull/23#pullrequestreview-6065092992",
+        "review_state": "COMMENT"
       }
     ],
-    "evidence": "Fresh cloneT2003,officialSHA256Julia1.12.6,new own depot+optionalenv,instantiate exit0. Combined unchanged hmat153 +external metric4+357 + own algebra11+exteriorfailure5=530passed,exit0,no skips/Broken. Independent reference_tests4394/4394,61 testsets,exit0,no skips/Broken;total4924. Own algebra validates minusCflux and exteriorA solve,sourceorder,empty/other traces,0 absolute algebraerror. Forced exterior maxiter1 throws columns[2,3],residuals0.1914386422/0.1929649423,nulliterate exact0. Source1/2 replay pressures and normal derivatives maxpointwise<=1.27e-6;2255/2258 Neumannzero entries absolute0Pa/m. P2 reproduced current remainder test skips pointwise criteria: Neumann pointwise5/2.828427/4.472136 despite normalized maxima~1e-12;maxabsolute7.916929e-10/6.029662e-10/9.275109e-10Pa/m;exactzero errors5.684342e-14/2.842171e-14/5.684342e-14Pa/m. Pressure remainder pointwise4.049291e-7/4.049292e-7/1.367863e-6,abs1.024891e-8/7.805333e-9/1.647395e-8Pa. Not500% totalfield error; require pointwise+absolute/unit reporting and explicit qualification limits,notwidenbaseline. Sourceclean,no edits;no independentlyassembled Hreplay/GPU/h343/performance qualification. Lease renewed viaCAS during long gate.",
+    "evidence": "Fresh clone T2105, official SHA256 Julia1.12.6, own new depot+optionalenv; instantiate exit0. Unchanged H-hook159+external4+4+372+own24=563passed,exit0,no skips/Broken. New P2 report fix confirmed: full pointwise nonzero ratios5/2.828427/4.472136 and absolute/unit/zero errors visible; separate significant-vs-rounding-residue fixture acceptance explicit. Phase and threshold-edge probes pass. N1 optional reproduced both test helpers: all-zero vectors and total_scale0 produce relative_significantNaN/significant_count3 via 0/0; suggest nonzero mask and regression, no solver failure. Dense500Hz pressure remainder pointwise8.246211,abs1.425416e-14Pa,6 exactzeros max1.776357e-15Pa. Sourceclean; only2testfiles changed; no repeated full gate/Python; prior4394 gate belongs a2b222e. No independent physical H-replay reference/GPU/h343/performance qualification.",
     "pending": [
-      "PR23 a2b222e REQUEST_CHANGES6064421809: new replay signs/contract/exteriorfailure verified; fix remainder reporting/test criterion in hmat_engine_hook_test229-238 and external_bem_solver_tests246-256. Add pointwise relative and absolute/unit null metrics; current normalizedtotalmax is not replacement. Large ratios in tiny/cancelled entries not large totalfielderror. Other H solver/runtime/hardware qualifications remain open.",
+      "PR23 P2 from a2b222e resolved on01ccb01. Optional N1 zero-scale test-helper edge reported in6065092992. Other H solver/runtime/hardware qualifications open.",
       "PR22 field fixes confirmed atd73eacc;heuristic/h-mass-solve/fieldarithmetic/assembly/hardware limits remain.",
       "PR14 N1/N2b2b756d awaits independent follow-up;row-quadrature/adjoint review and h343 qualification open.",
       "PR19 numerical/export findings and owner split/merge decision open;three ROM fixes verified.",
