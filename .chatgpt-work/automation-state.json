@@ -21,40 +21,40 @@
     22
   ],
   "lease": {
-    "holder": "work25-10-mwvwf94v",
-    "acquired_at": "2026-11-25T09:05:55.711Z",
-    "expires_at": "2026-11-25T10:35:55.711Z",
+    "holder": null,
+    "acquired_at": null,
+    "expires_at": null,
     "fencing_token": 19
   },
   "last_completed_run": {
-    "id": "work25-09-mwvu8md2",
-    "started_at": "2026-11-25T08:04:47.030Z",
-    "completed_at": "2026-11-25T08:14:14.111Z",
-    "status": "external_bem_contract_review_metric_correction_requested",
+    "id": "work25-10-mwvwf94v",
+    "started_at": "2026-11-25T09:05:55.711Z",
+    "completed_at": "2026-11-25T09:13:01.589Z",
+    "status": "external_bem_metric_fix_and_extended_tests_verified",
     "source_commit": "b34abee291207a13876068c99948d8ca386756fa",
     "checked_heads": {
       "9": "3d639cef853f6c60caa36fda4a8b39f28baec3f7",
       "14": "b2b756da7076cab3b32a63c822ec91af36a7e6ce",
       "19": "7afbaf4b3d88b1f15e39c12ab9a2a47473b336c9",
       "22": "d73eacc8eb21fa795377a2d808268b0348cd5179",
-      "23": "51d94c1a1739fe44ab8ef03f50191024010fade7"
+      "23": "6f614a706524ef31d26009eafefc46944ca29131"
     },
     "source_changes": false,
     "tests_rerun": true,
     "actions": [
       {
         "pr": 23,
-        "commit": "51d94c1a1739fe44ab8ef03f50191024010fade7",
-        "review_id": 6053962095,
-        "url": "https://github.com/ttakoprivate/BEAT_Engine/pull/23#pullrequestreview-6053962095",
-        "review_state": "CHANGES_REQUESTED"
+        "commit": "6f614a706524ef31d26009eafefc46944ca29131",
+        "review_id": 6054707834,
+        "url": "https://github.com/ttakoprivate/BEAT_Engine/pull/23#pullrequestreview-6054707834",
+        "review_state": "COMMENTED"
       }
     ],
-    "evidence": "Fresh clone own official SHA256 verified Julia1.12.6/depot, instantiate exit0. New external hook suite71/71;own metric counterexample2/2;four CPU cases symmetryx/xy,wallimpedance,thermoviscous,each2voltages/sixoutputs:100/100,maximum pointwise complex relative0 every output/excitation,1026 exact BEM-Neumann zeros/case/excitation abs0Pa/m. Total173 passed,no skips/Broken,successful harness exit0. Initial harness exit1 after73 passed because fixture negativeX invalidforsymmetry;correctly rejected,then translated BOTH meshes by(0.3,0.3,0)m and reran. Reproduced weak testmetric:ref[1,1e-12],candidate[1,2e-12],old1e-12 vs pointwise1.0;P2 REQUEST_CHANGES at tests/external_bem_solver_tests.jl34-37. CPU signs/layout/wall contract confirmed, no hooksolutionbug found. Source clean. No full reference gate/coupled530/Python/GPU/performance tests. Shell initial diff base ref absent until fetched; no sourcechanges.",
+    "evidence": "Fresh isolated clone,new official SHA256 verified Julia1.12.6 and own depot,instantiate exit0. Repository external_bem_solver_tests4+270 passed;8 own metric checks pass,total282,no skips/Broken,exit0. Original metric counterexample now1.0;phase reversal2.0;nonzero/zero split,allzero candidate differences,length rejection verified. Expanded symmetry/wall and prescribed BEM solves pass with pointwise0 for same layout. Flux-eliminated dense vs none hook max1.485974106e-10 interface_flux excitation1,6.44644e-11 excitation2;alloutputs documented. Exact BEM-Neumannzeros1026withdrivers,2244withoutdriver,prescribed source1=2242/source2=2244,abs0Pa/m. Sourceguard skips assemblyplan/compactcolumns for hook,CPUdiagnosticexternal passes;notMetalexecution. Clean source/no edits. No coupled530/fullreference/Python/GPU/performance rerun.",
     "pending": [
-      "PR23 head51d94c1 targethmatrixdev: replace normed-max helper with pointwise complex relative/nonzero and absolute exact-zero criteria; add regression. New CPU symmetry/wall checks positive; missing prescribed-source solve,Float32/switch,realMetal combinations suggested. Metal assembly-plan prep still before hook,source-only note,no hardwarebug claimed.",
-      "PR22 prior field findings fixed and verified atd73eacc;heuristic,h-mass-solve,fieldarithmetic,assembly/hardware limits remain.",
-      "PR14 N1/N2b2b756d awaits independent follow-up;full row-quadrature/adjoint review and h343 qualification open.",
+      "PR23 P2 metric fixed and independently verified at6f614a7;added symmetry/wall/prescribed-source solves and hook preparation skip confirmed. Specific change request resolved. Float32/switch combinations and trueMetal remain open;actual H-matrix solver is next author work,notqualified.",
+      "PR22 field fixes confirmed atd73eacc;heuristic/h-mass-solve/fieldarithmetic/assembly/hardware limits remain.",
+      "PR14 N1/N2b2b756d awaits independent follow-up;row-quadrature/adjoint review and h343 qualification open.",
       "PR19 numerical/export findings and owner split/merge decision open;three ROM fixes verified.",
       "Issue12 VACS sample/format answers pending;PR17 merged;PR9 roadmap update planned."
     ],
