@@ -103,6 +103,70 @@ with_baseline_cpu_coupled() do
                 end
             end
         end
+        # REVIEW-23-5ea59ac: actual solves of prescribed BEM sources (with the driver in the system),
+        # matrix right-hand sides with a zero column, and a forced GMRES failure.
+        @testset "prescribed BEM sources, matrix RHS, forced non-convergence (700 Hz)" begin
+            faces = length(bem.faces)
+            prescribed = sparse([1, 2, faces], [1, 1, 2], [1.0, -0.5, 2.0], faces, 2)
+            sources = [(kind=:normal_velocity, fem_boundary_tags=Int[], fem_boundary_weights=Float64[],
+                        bem_source_index=1, amplitude=ComplexF64(1, 0)),
+                       (kind=:normal_velocity, fem_boundary_tags=Int[], fem_boundary_weights=Float64[],
+                        bem_source_index=2, amplitude=ComplexF64(-0.4, 0.9))]
+            solves = HMatCoupledSolve[]
+            dense = build(700.0; transducers=[tr], prescribed_bem_normal_velocity=prescribed)
+            hsys = build(700.0; transducers=[tr], prescribed_bem_normal_velocity=prescribed,
+                bem_solver=hmatrix_bem_solver(; tol=HOOK_TOL, rtol=1e-9, solves=solves))
+            failing = HMatCoupledSolve[]
+            hfail = build(700.0; transducers=[tr],
+                bem_solver=hmatrix_bem_solver(; tol=HOOK_TOL, rtol=1e-9, maxiter=1, solves=failing))
+            try
+                reference = solve_condensed_coupled_excitations(dense, sources)
+                candidate = solve_condensed_coupled_excitations(hsys, sources)
+                @test all(s -> s.solved, only(solves).stats)
+                for (column, (r, c)) in enumerate(zip(reference, candidate))
+                    checked = 0
+                    for name in HOOK_OUTPUTS
+                        hasproperty(r, name) && hasproperty(c, name) || continue
+                        rv = getproperty(r, name); rv isa AbstractArray{<:Number} || continue
+                        e = hook_pointwise_error(rv, getproperty(c, name)); checked += 1
+                        @printf("    BEM source %d %-19s pointwise %.2e  normwise %.2e%s\n", column, name,
+                            e.relative, e.normwise,
+                            e.zero_count > 0 ? @sprintf("  (%d exact zeros, max abs %.2e)", e.zero_count, e.absolute_at_zero) : "")
+                        @test e.relative < HOOK_BOUND
+                        @test e.absolute_at_zero <= HOOK_BOUND * max(e.scale, floatmin(Float64))
+                    end
+                    @test checked >= 6
+                end
+                # Matrix RHS: zero column stays exactly zero, the others reach the scaled residual.
+                S = only(solves); n = size(S, 1); D = Diagonal(S.base.row_scale)
+                r = ComplexF64.(sin.(1:n) .+ im .* cos.(0.7 .* (1:n)))
+                R = hcat(r, zeros(ComplexF64, n), (0.3 - 0.7im) .* reverse(r))
+                X = S \ R
+                @test size(X) == size(R) && iszero(X[:, 2])
+                for c in (1, 3)
+                    res = norm(D * (_hmat_coupled_mul(S, X[:, c]) .- R[:, c])) / norm(D * R[:, c])
+                    @printf("    matrix RHS column %d: scaled residual %.2e\n", c, res)
+                    @test res <= 1e-8
+                end
+                @test vec(S \ r) ≈ X[:, 1] rtol = 1e-7
+                # Forced failure: unconverged columns are reported, never returned as a solution.
+                F = only(failing)
+                err = try
+                    F \ R; nothing
+                catch e
+                    e
+                end
+                @test err isa FmmNotConvergedError
+                @test err.columns == [1, 3]
+                @test length(err.residuals) == 2 && all(>(1e-9), err.residuals)
+                @test size(err.iterates) == size(R) && iszero(err.iterates[:, 2])
+                @test_throws FmmNotConvergedError solve_condensed_coupled_excitations(hfail, [voltage])
+            finally
+                release_condensed_coupled_system!(dense)
+                release_condensed_coupled_system!(hsys)
+                release_condensed_coupled_system!(hfail)
+            end
+        end
         @testset "Float32 systems are rejected" begin
             hook = hmatrix_bem_solver()
             @test_throws ErrorException hook((bem_mesh=bem, prepared=nothing, wavenumber=1.0, singular_order=1,
