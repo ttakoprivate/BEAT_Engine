@@ -83,10 +83,12 @@ Returns a `bem_solver` for `build_condensed_coupled_system`. `tol`: ACA/recompre
 `eta`: admissibility; `leaf`: cluster leaf size; `rtol`: GMRES relative residual of the row-scaled
 system. `entry_type`/`todev` select the far-field entry kernel (Float64 CPU here; Float32 + device
 array constructor for Metal/CUDA). If `solves` is a vector, every `HMatCoupledSolve` is pushed to it
-(iterations, residuals and build diagnostics for tests and reports).
+(iterations, residuals and build diagnostics for tests and reports). The returned hook also has
+`exterior_solve` (A \\ R on H(A), used by `retain_interface_radiation`); if `exterior_stats` is a vector,
+each of its GMRES columns pushes `(iterations, solved, residual, seconds)` there.
 """
 function hmatrix_bem_solver(; tol::Float64=1e-6, eta::Float64=1.0, leaf::Int=48, rtol::Float64=1e-9,
-        maxiter::Int=300, entry_type::Type=Float64, todev=identity, solves=nothing)
+        maxiter::Int=300, entry_type::Type=Float64, todev=identity, solves=nothing, exterior_stats=nothing)
     return context -> begin
         T = context.scalar_type
         T === Float64 || error("The H-matrix BEM solver is validated with Float64 systems only (got $T).")
@@ -139,6 +141,33 @@ function hmatrix_bem_solver(; tol::Float64=1e-6, eta::Float64=1.0, leaf::Int=48,
             isnothing(solves) || push!(solves, S)
             S
         end
-        (; flux_operator_mul, factorize)
+        # A \ R for the interface radiation replay (`retain_interface_radiation`): GMRES on H(A) alone,
+        # right-preconditioned with the near-field LU of A and row-scaled like the coupled solve.
+        exterior_solve = R -> begin
+            An, _ = fmm_near_blocks(op)
+            F = lu(An)
+            D = Diagonal(1 ./ max.(vec(sqrt.(sum(abs2, An; dims=2))), floatmin(Float64)))
+            Aop = LinearMap{ComplexF64}(v -> D * hmul(HA, v), nB, nB)
+            P = LinearMap{ComplexF64}(v -> F \ (D \ v), nB, nB)
+            X = zeros(ComplexF64, nB, size(R, 2))
+            failed = Int[]; failed_residuals = Float64[]
+            for c in axes(R, 2)
+                r = D * ComplexF64.(R[:, c])
+                if iszero(r)
+                    isnothing(exterior_stats) || push!(exterior_stats, (iterations=0, solved=true, residual=0.0, seconds=0.0))
+                    continue
+                end
+                t = @elapsed x, st = gmres(Aop, r; N=P, ldiv=false, rtol=rtol, atol=0.0, memory=min(maxiter, 300),
+                    itmax=maxiter, restart=maxiter > 300)
+                X[:, c] = x
+                residual = norm(r - Aop * x) / norm(r)
+                isnothing(exterior_stats) ||
+                    push!(exterior_stats, (iterations=st.niter, solved=st.solved, residual=residual, seconds=t))
+                st.solved || (push!(failed, c); push!(failed_residuals, residual))
+            end
+            isempty(failed) || throw(FmmNotConvergedError(failed, failed_residuals, X))
+            X
+        end
+        (; flux_operator_mul, factorize, exterior_solve)
     end
 end

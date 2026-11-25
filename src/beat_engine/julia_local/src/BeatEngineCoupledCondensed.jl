@@ -2120,10 +2120,13 @@ function build_condensed_coupled_system(
     #     `SplitGMRES`. `rest` is the sparse system without the BEM operator entries: rows
     #     `layout.bem_range` hold only what is not A or C (nothing at present). The solver must apply
     #     rows bem_range as rest + A x[bem_range] + C (bem_flux x[flux_range] + bem_motion_flux x[mechanical_range]).
+    #   Optional, required only with `retain_interface_radiation=true`:
+    #   exterior_solve(R) = A \ R for a matrix of right-hand sides (the exterior Burton-Miller operator
+    #     alone, without the coupled rows). The interface radiation replay then forms its right-hand
+    #     sides as -C * (bem_flux * flux) through `flux_operator_mul`, never as a dense C * bem_flux block.
     # The interface elimination is forced off (:none layout); no dense BEM block is ever formed.
     if !isnothing(bem_solver)
         isnothing(bem_operators) || error("An external BEM solver cannot be combined with prefetched dense BEM operators.")
-        retain_interface_radiation && error("An external BEM solver does not support retain_interface_radiation yet.")
     end
     # `relative_residual` needs the monolithic coupled matrix, which this formulation never
     # forms. `fem_interior_residual` on each solution is the condensed-appropriate check.
@@ -2405,7 +2408,15 @@ function build_condensed_coupled_system(
         bem_prescribed_rhs = prescribed_bem_count == 0 ?
                              zeros(Complex{T}, length(bem_mesh.vertices), 0) :
                              Complex{T}.(-external_bem.flux_operator_mul(bem_prescribed_neumann))
-        interface_radiation_replay = nothing
+        interface_radiation_replay = if retain_interface_radiation
+            hasproperty(external_bem, :exterior_solve) || error(
+                "retain_interface_radiation with an external BEM solver needs its `exterior_solve` (A \\ R).",
+            )
+            (backend=:external, flux_operator_mul=external_bem.flux_operator_mul,
+             exterior_solve=external_bem.exterior_solve)
+        else
+            nothing
+        end
         bem_matrix_s = (time_ns() - bem_matrix_started) / 1.0e9
       else
         bem_operator_started = time_ns()

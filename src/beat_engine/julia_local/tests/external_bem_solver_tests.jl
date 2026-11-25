@@ -3,12 +3,15 @@
 # must reproduce the dense condensed path (Float64) to rounding, for every output and excitation.
 # This checks the hook's layout and sign contract; the H-matrix solver plugs into the same hook.
 include(joinpath(@__DIR__, "coupled_condensed_test_setup.jl"))
+isdefined(@__MODULE__, :BeatEngineInterfaceRadiation) ||
+    include(joinpath(@__DIR__, "..", "src", "BeatEngineInterfaceRadiation.jl"))
+using .BeatEngineInterfaceRadiation
 using Test
 
 const EXT_ROOT = CONDENSED_FIXTURE_ROOT
 
 # Dense reference implementation of the hook contract (see build_condensed_coupled_system).
-function dense_hook_solver(calls::Ref{Int}, rests::Vector{Any})
+function dense_hook_solver(calls::Ref{Int}, rests::Vector{Any}; exterior_solve::Bool=true)
     return context -> begin
         calls[] += 1
         operators = BeatEngineCoupledCondensed._assemble_condensed_bem_operators(
@@ -16,7 +19,9 @@ function dense_hook_solver(calls::Ref{Int}, rests::Vector{Any})
         A, R, _ = BeatEngineCoupledCondensed._combine_condensed_bem_operators!(operators, context.prepared, context.wavenumber)
         # R is the dense path's right-hand operator -C.
         C = -Matrix(R)
-        (
+        exterior = exterior_solve ? (; exterior_solve=(let F = lu(A); Rhs -> F \ Rhs; end)) : (;)
+        (;
+            exterior...,
             flux_operator_mul=Q -> C * Q,
             factorize=(rest, layout) -> begin
                 push!(rests, (rest=rest, layout=layout))
@@ -211,9 +216,78 @@ with_baseline_cpu_coupled() do
             end
         end
 
+        # Interface radiation replay through the hook's `exterior_solve` and `flux_operator_mul`: the
+        # traces of every interface source must equal the dense condensed replay (A \ (-C bem_flux q)).
+        @testset "interface radiation replay" begin
+            faces = length(bem_mesh.faces)
+            prescribed = sparse([1, 2, faces], [1, 1, 1], [1.0, -0.5, 2.0], faces, 1)
+            bem_source = (kind=:normal_velocity, fem_boundary_tags=Int[], fem_boundary_weights=Float64[],
+                          bem_source_index=1, amplitude=ComplexF64(-0.4, 0.9))
+            for (name, f, transducers, excitations) in (
+                ("replay no transducer 500 Hz", 500.0, ElectrodynamicTransducer{Float64}[], [velocity, bem_source]),
+                ("replay transducer 700 Hz", 700.0, [transducer], [voltage, voltage_b, bem_source]),
+            )
+                dense = build(f; transducers=transducers, prescribed_bem_normal_velocity=prescribed,
+                              retain_interface_radiation=true)
+                external = build(f; transducers=transducers, prescribed_bem_normal_velocity=prescribed,
+                                 retain_interface_radiation=true, bem_solver=dense_hook_solver(Ref(0), Any[]))
+                try
+                    @test external.interface_radiation_replay.backend == :external
+                    references = solve_condensed_coupled_excitations(dense, excitations)
+                    candidates = solve_condensed_coupled_excitations(external, excitations)
+                    for (column, (r, c)) in enumerate(zip(references, candidates))
+                        n = length(r.interface_flux)
+                        ranges = [1:2:n, 2:2:n]
+                        for include_other in (false, true)
+                            tr = interface_radiation_traces(dense, r, ranges; include_other=include_other)
+                            tc = interface_radiation_traces(external, c, ranges; include_other=include_other)
+                            @test size(tc.pressure) == size(tr.pressure)
+                            for source in axes(tr.pressure, 2)
+                                if include_other && source == size(tr.pressure, 2)
+                                    # The remainder column is a difference (total minus interface traces):
+                                    # with no other source it is rounding noise, so it is bounded in
+                                    # absolute terms against the total output's largest magnitude.
+                                    dp = maximum(abs, tc.pressure[:, source] .- tr.pressure[:, source]) / maximum(abs, r.bem_pressure)
+                                    dn = maximum(abs, tc.normal_derivative[:, source] .- tr.normal_derivative[:, source]) /
+                                         max(maximum(abs, r.bem_neumann), floatmin(Float64))
+                                    println("  $name excitation $column remainder: max abs error / max |total| ",
+                                            "pressure $dp, normal derivative $dn")
+                                    @test dp < 1e-10 && dn < 1e-10
+                                    continue
+                                end
+                                ep = pointwise_complex_error(tr.pressure[:, source], tc.pressure[:, source])
+                                en = pointwise_complex_error(tr.normal_derivative[:, source], tc.normal_derivative[:, source])
+                                println("  $name excitation $column source $source (other=$include_other): ",
+                                        "pressure $(ep.relative), normal derivative $(en.relative)",
+                                        en.zero_count > 0 ? " ($(en.zero_count) exact zeros, max abs $(en.absolute_at_zero) Pa/m)" : "")
+                                @test ep.relative < 1e-10 && ep.absolute_at_zero <= 1e-10 * max(ep.scale, floatmin(Float64))
+                                @test en.relative < 1e-10 && en.absolute_at_zero <= 1e-10 * max(en.scale, floatmin(Float64))
+                            end
+                            # Without the remainder column, sources outside the interface (motion,
+                            # prescribed BEM velocity) leave a gap; it must match the dense replay's.
+                            @test isapprox(tc.reconstruction_error, tr.reconstruction_error; rtol=1e-9, atol=1e-12)
+                            include_other && @test tc.reconstruction_error < 1e-9
+                        end
+                        # Source order and a zero interface flux are preserved.
+                        reversed = interface_radiation_traces(external, c, reverse(ranges))
+                        @test reversed.pressure ≈ interface_radiation_traces(external, c, ranges).pressure[:, end:-1:1]
+                        zero_solution = merge(c, (interface_flux=zero.(c.interface_flux),
+                            bem_pressure=zero.(c.bem_pressure), bem_neumann=zero.(c.bem_neumann)))
+                        @test iszero(norm(interface_radiation_traces(external, zero_solution, ranges).pressure))
+                        @test size(interface_radiation_traces(external, c, UnitRange{Int}[]).pressure) == (length(c.bem_pressure), 0)
+                    end
+                finally
+                    release_condensed_coupled_system!(dense)
+                    release_condensed_coupled_system!(external)
+                end
+            end
+        end
+
         @testset "unsupported combinations are rejected" begin
             solver = dense_hook_solver(Ref(0), Any[])
-            @test_throws ErrorException build(500.0; bem_solver=solver, retain_interface_radiation=true)
+            # The replay needs the hook's exterior solve; a hook without one is rejected at build time.
+            @test_throws ErrorException build(500.0; bem_solver=dense_hook_solver(Ref(0), Any[]; exterior_solve=false),
+                                              retain_interface_radiation=true)
             @test_throws ErrorException build(500.0; bem_solver=solver, bem_operators=() -> nothing)
         end
     end

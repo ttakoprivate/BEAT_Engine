@@ -40,17 +40,25 @@ function interface_radiation_traces(system, solution, ranges; include_other::Boo
     replay = system.interface_radiation_replay
     isnothing(replay) && error("Interface radiation replay was not requested during assembly.")
     T = eltype(solution.bem_pressure)
-    device_replay = get(replay, :backend, :cpu) == :cuda
+    backend = get(replay, :backend, :cpu)
+    device_replay = backend == :cuda
+    # An external BEM solver (roadmap step 6) keeps no dense C * bem_flux block: the right-hand
+    # side -C * (bem_flux * flux) goes through its operator, and A \ rhs through its exterior solve.
+    external_replay = backend == :external
     rhs = device_replay ? nothing : zeros(T, length(solution.bem_pressure), length(ranges))
     flux = zeros(T, length(solution.bem_neumann), length(ranges))
     for (index, indices) in enumerate(ranges)
         values = view(solution.interface_flux, indices)
-        if !device_replay
+        flux[:, index] = system.interface_operators.bem_flux[:, indices] * values
+        if !device_replay && !external_replay
             rhs[:, index] = -(view(replay.interface_block, :, indices) * values)
         end
-        flux[:, index] = system.interface_operators.bem_flux[:, indices] * values
+    end
+    if external_replay && !isempty(ranges)
+        rhs .= .-replay.flux_operator_mul(flux)
     end
     pressure = device_replay ? _cuda_replay_pressure(replay, solution.interface_flux, ranges) :
+               external_replay ? (isempty(ranges) ? rhs : T.(replay.exterior_solve(rhs))) :
                replay.factorization \ rhs
     if include_other
         pressure = hcat(pressure, solution.bem_pressure - vec(sum(pressure; dims=2)))

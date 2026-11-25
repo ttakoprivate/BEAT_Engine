@@ -10,6 +10,7 @@ const JL_ROOT = normpath(joinpath(@__DIR__, "..", ".."))
 include(joinpath(JL_ROOT, "src", "BeatEngineCore.jl")); using .BeatEngineCore
 include(joinpath(JL_ROOT, "src", "BeatEngineCoupled.jl")); using .BeatEngineCoupled
 include(joinpath(JL_ROOT, "tests", "coupled_condensed_test_setup.jl"))
+include(joinpath(JL_ROOT, "src", "BeatEngineInterfaceRadiation.jl")); using .BeatEngineInterfaceRadiation
 include(joinpath(JL_ROOT, "src", "BeatEngineFmm.jl")); using .BeatEngineFmm
 include(joinpath(JL_ROOT, "hmatrix_dev", "hmat_engine_solver.jl"))
 using Test
@@ -202,6 +203,65 @@ with_baseline_cpu_coupled() do
             @test errors[1e-6] < HOOK_BOUND
             @test errors[1e-8] < 1e-6
             @test errors[1e-8] < errors[1e-6] / 100
+        end
+        # Interface radiation replay (`retain_interface_radiation`) through the hook's exterior solve
+        # (GMRES on H(A)) against the dense Float64 condensed replay, per interface source and excitation.
+        @testset "interface radiation replay through H(A) (700 Hz)" begin
+            faces = length(bem.faces)
+            prescribed = sparse([1, 2, faces], [1, 1, 1], [1.0, -0.5, 2.0], faces, 1)
+            excitations = [voltage, voltage_b, (kind=:normal_velocity, fem_boundary_tags=Int[], fem_boundary_weights=Float64[],
+                           bem_source_index=1, amplitude=ComplexF64(-0.4, 0.9))]
+            dense = build(700.0; transducers=[tr], prescribed_bem_normal_velocity=prescribed, retain_interface_radiation=true)
+            stats = NamedTuple[]
+            hsys = build(700.0; transducers=[tr], prescribed_bem_normal_velocity=prescribed, retain_interface_radiation=true,
+                bem_solver=hmatrix_bem_solver(; tol=HOOK_TOL, rtol=1e-9, exterior_stats=stats))
+            try
+                @test hsys.interface_radiation_replay.backend == :external
+                references = solve_condensed_coupled_excitations(dense, excitations)
+                candidates = solve_condensed_coupled_excitations(hsys, excitations)
+                for (column, (r, c)) in enumerate(zip(references, candidates))
+                    n = length(r.interface_flux)
+                    ranges = [1:2:n, 2:2:n]
+                    t_ref = interface_radiation_traces(dense, r, ranges; include_other=true)
+                    t_h = interface_radiation_traces(hsys, c, ranges; include_other=true)
+                    @test size(t_h.pressure) == size(t_ref.pressure) == (length(r.bem_pressure), 3)
+                    for source in axes(t_ref.pressure, 2)
+                        if source == size(t_ref.pressure, 2)
+                            # Remainder column (total minus interface traces): a cancellation difference,
+                            # bounded in absolute terms against the total output's largest magnitude.
+                            dp = maximum(abs, t_h.pressure[:, source] .- t_ref.pressure[:, source]) / maximum(abs, r.bem_pressure)
+                            dn = maximum(abs, t_h.normal_derivative[:, source] .- t_ref.normal_derivative[:, source]) /
+                                 max(maximum(abs, r.bem_neumann), floatmin(Float64))
+                            @printf("    replay excitation %d remainder: max abs error / max |total| pressure %.2e, normal derivative %.2e\n",
+                                column, dp, dn)
+                            @test dp < HOOK_BOUND && dn < HOOK_BOUND
+                            continue
+                        end
+                        ep = hook_pointwise_error(t_ref.pressure[:, source], t_h.pressure[:, source])
+                        en = hook_pointwise_error(t_ref.normal_derivative[:, source], t_h.normal_derivative[:, source])
+                        @printf("    replay excitation %d source %d: pressure pointwise %.2e normwise %.2e; normal derivative pointwise %.2e%s\n",
+                            column, source, ep.relative, ep.normwise, en.relative,
+                            en.zero_count > 0 ? @sprintf(" (%d exact zeros, max abs %.2e Pa/m)", en.zero_count, en.absolute_at_zero) : "")
+                        @test ep.relative < HOOK_BOUND && ep.absolute_at_zero <= HOOK_BOUND * max(ep.scale, floatmin(Float64))
+                        @test en.relative < HOOK_BOUND && en.absolute_at_zero <= HOOK_BOUND * max(en.scale, floatmin(Float64))
+                    end
+                    @test t_h.reconstruction_error < HOOK_BOUND
+                end
+                @test !isempty(stats) && all(s -> s.solved && s.residual < 1e-8, stats)
+                for s in stats
+                    @printf("    exterior GMRES %d iterations, scaled relative residual %.2e\n", s.iterations, s.residual)
+                end
+                # A zero interface flux gives zero traces without a GMRES run.
+                count_before = length(stats)
+                c = first(candidates)
+                zero_solution = merge(c, (interface_flux=zero.(c.interface_flux), bem_pressure=zero.(c.bem_pressure),
+                    bem_neumann=zero.(c.bem_neumann)))
+                @test iszero(norm(interface_radiation_traces(hsys, zero_solution, [1:2:length(c.interface_flux)]).pressure))
+                @test all(s -> s.iterations == 0, stats[(count_before + 1):end])
+            finally
+                release_condensed_coupled_system!(dense)
+                release_condensed_coupled_system!(hsys)
+            end
         end
         @testset "Float32 systems are rejected" begin
             hook = hmatrix_bem_solver()
