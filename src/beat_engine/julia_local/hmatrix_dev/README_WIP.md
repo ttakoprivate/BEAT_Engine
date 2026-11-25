@@ -22,6 +22,9 @@ Numbers in that file are development measurements, not release benchmarks.
 
 Layout:
 - `hmat_core.jl`, `hmat_fast.jl`, `hmat_ka.jl`, `hmat_c.jl` – H-matrix code.
+- `hmat_engine_solver.jl` – `hmatrix_bem_solver()`: the H-matrix solver for the engine hook
+  `build_condensed_coupled_system(...; bem_solver=...)` (roadmap step 6, part 2; CPU Float64 validated on the
+  test fixture by `tests/hmat_engine_hook_test.jl`, no engine switch yet).
 - `tests/` – standalone test drivers (run from a work directory holding the engine's
   `src/` and `tests/`, see the scripts in `mac_scripts/`).
 - `patches/hmat_dump_hook.diff` – env-gated development hook (`BLAB_HMAT_DUMP`), not applied.
