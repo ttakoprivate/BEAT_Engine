@@ -21,22 +21,22 @@
     22
   ],
   "lease": {
-    "holder": "work26-15-mwxmk0wy",
-    "acquired_at": "2026-11-26T14:05:14.530Z",
-    "expires_at": "2026-11-26T15:35:14.530Z",
+    "holder": null,
+    "acquired_at": null,
+    "expires_at": null,
     "fencing_token": 30
   },
   "last_completed_run": {
-    "id": "work26-14-mwxk3u12",
-    "started_at": "2026-11-26T12:56:39.878Z",
-    "completed_at": "2026-11-26T13:04:41.259Z",
-    "status": "synthesized_field_estimate_review_completed",
+    "id": "work26-15-mwxmk0wy",
+    "started_at": "2026-11-26T14:05:14.530Z",
+    "completed_at": "2026-11-26T14:09:03.590Z",
+    "status": "synthesis_underflow_fix_verified",
     "source_commit": "b34abee291207a13876068c99948d8ca386756fa",
     "checked_heads": {
       "9": "3d639cef853f6c60caa36fda4a8b39f28baec3f7",
       "14": "b2b756da7076cab3b32a63c822ec91af36a7e6ce",
       "19": "7afbaf4b3d88b1f15e39c12ab9a2a47473b336c9",
-      "22": "b0c218b55a76ae3fed850fe273dd77d6aa509dab",
+      "22": "7a1c9c06d339ab841b44a152e83967a56f78a978",
       "23": "dd351b9e7b7ef704c1d228b675b7a89719b6a7d5"
     },
     "source_changes": false,
@@ -44,16 +44,16 @@
     "actions": [
       {
         "pr": 22,
-        "commit": "b0c218b55a76ae3fed850fe273dd77d6aa509dab",
-        "review_id": 6074601754,
-        "url": "https://github.com/ttakoprivate/BEAT_Engine/pull/22#pullrequestreview-6074601754",
+        "commit": "7a1c9c06d339ab841b44a152e83967a56f78a978",
+        "review_id": 6075527126,
+        "url": "https://github.com/ttakoprivate/BEAT_Engine/pull/22#pullrequestreview-6075527126",
         "review_state": "COMMENT"
       }
     ],
-    "evidence": "Fresh cloneT1300, official SHA256 Julia1.12.6,new own depot, CPU instantiate exit0. Unchanged output_error_estimate_tests467/467 exit0 no skips/Broken. Own independent BigFloat scalar synthesis10 +subnormal reproductions3 exit0; actual weighted driver branch with stubs14 exit0;total494. Normal/cancellation/zero-weight cases covered incl ignoring unknown bound on zero-weight input; driver static/sweep preserves Float64 requested+Float32 usedweights, onefield/twoinputs; time intervals separate. N1 lowpriority range limitation reproduced:normalFloat32 pressure1e-25Pa *used/requested weightFloat64(1f-20) ->subnormal synthesis; BigFloat exact9.999999878070033e-46Pa,candidate1.401298464324817e-45Pa,relativeerror0.4012984814,abs4.012984765e-46Pa;estimate2.647557040e-7,impliedabsbound3.710017614e-52Pa. Relative gamma model lacks absolute underflow term; suggest guard/unknown or document+test range; tiny absolute,notlargephysicalfieldfailure. Sourceclean,no baseline edits; no full E2E/gate/Python/independent physical BEM reference/GPU/h343/performance qualification.",
+    "evidence": "Fresh cloneT1405, official SHA256 Julia1.12.6,new own depot. Targeted actual helper functions+new unchanged repository underflow regression404, own original/normalrange10 and independent BigFloat fuzz240=654passed exit0/no skips/Broken. Original parentb0c218b underbound reproduced; current exact absoluteerror4.012984765178138e-46Pa unchanged, currentestimate2.0000007705 and impliedabsbound2.8025980084e-45Pa covers; oldestimate2.6475570397e-7/3.7100176139e-52Pa. Normal/cancellation/zero-weight+unknownbound controls pass. 240 cases Float32/64,1/2/5/8exc,3complexcomponents,subnormal-near-normal data and weights2^-20..2^5; compare unrounded256bitBigFloat errors to BigFloat(bound),allcovered. Only standardlibraries, scalaridentity propagation for complete estimate, actual boundary bound unchanged AST fromsource. Sourceclean; no baseline/projectedits. Prior467suite belongsb0c218b not rerun. No full E2E/gate/Python/independent physical BEM reference/GPU/h343/performance qualification.",
     "pending": [
       "PR23 N1 zero-scale metric edge resolved and independently verified atdd351b9;other H solver/runtime/hardware qualifications open.",
-      "PR22 b0c218b weighted synthesis reviewed6074601754 COMMENT:normalcases/wiring verified467+27=494;N1 lowpriority subnormal product range underbound,absolute4e-46Pa. Prior timingP2 resolved. Existing heuristic/h-mass-solve/fieldarithmetic/assembly/hardware limits remain.",
+      "PR22 N1 subnormal synthesis underbound fromb0c218b resolved on7a1c9c0 and independently verified6075527126 (654targeted). Prior timingP2 resolved. Existing heuristic/h-mass-solve/fieldarithmetic/assembly/hardware limits remain.",
       "PR14 N1/N2b2b756d awaits independent follow-up;row-quadrature/adjoint review and h343 qualification open.",
       "PR19 numerical/export findings and owner split/merge decision open;three ROM fixes verified.",
       "Issue12 VACS sample/format answers pending;PR17 merged;PR9 roadmap update planned."
