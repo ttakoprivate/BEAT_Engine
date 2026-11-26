@@ -630,6 +630,42 @@ end
     end
 end
 
+@testset "field evaluation rounding: nearly tangential sources (cancellation in the normal projection)" begin
+    # REVIEW-22-2fd01ac P2: dot(r, n) cancels for a nearly tangential source; the reference bound was
+    # relative to the computed (cancelled) projection and fell below the true deviation (Float64, s=1e-8:
+    # deviation 5.86e-4 Pa, bound 1.99e-17 Pa). One synthetic quadrature source, BigFloat evaluation of
+    # exactly the same stored cache values and boundary data.
+    function oe_tangential_case(T, s, frequency, neumann)
+        normal = SVector{3,T}(SVector(1.0, 2.0^-54, -1.0) / sqrt(2.0))
+        cache = BeatEngineCore.FieldEvaluationCache{T}([SVector{3,T}(s, s, s)], [normal], T[1], [(1, 2, 3)], [1],
+                                           [SVector{3,T}(1, 0, 0)])
+        vertices = [SVector{3,T}(0, 0, 0), SVector{3,T}(1, 0, 0), SVector{3,T}(0, 1, 0)]
+        mesh = BeatEngineCore.BoundaryMesh{T}(vertices, [(1, 2, 3)], [1], [SVector{3,T}(1, 1, 0) / 3], [SVector{3,T}(0, 0, 1)],
+                                  T[0.5], [(vertices[1], vertices[2], vertices[3])])
+        p = Complex{T}[1, 1, 1]; q = Complex{T}[neumann]
+        k = T(2pi * frequency / 343)
+        points = [SVector(0.0, 0.0, 0.0)]
+        values, bound = OE.galerkin_field_float64_reference_cpu(points, p, q, k, cache)
+        exact = setprecision(BigFloat, 256) do
+            kk = BigFloat(OE.outgoing_wavenumber(k)); r_vec = BigFloat.(cache.source_points[1])
+            r = sqrt(sum(abs2, r_vec)); g = cis(kk * r) / (4 * BigFloat(pi) * r)
+            dl = g * (im * kk - 1 / r) * (sum(r_vec .* BigFloat.(normal)) / r)
+            ComplexF64(dl * Complex{BigFloat}(p[1]) - g * Complex{BigFloat}(q[1]))
+        end
+        field = evaluate_galerkin_field_cpu(points, mesh, p, q, k, cache; kernel=:scalar)
+        return abs(values[1] - exact), bound[1], abs(ComplexF64(field[1]) - exact),
+               abs(ComplexF64(field[1]) - values[1]) + bound[1]
+    end
+    for T in (Float32, Float64), s in (1.0, 1e-3, 1e-8), frequency in (0.0, 2000.0), neumann in (0.0, 1.2e-6)
+        deviation, bound, field_error, field_estimate = oe_tangential_case(T, s, frequency, neumann)
+        @test deviation <= bound
+        @test field_error <= field_estimate      # the scalar field kernel of the same data is covered
+    end
+    # the reviewer's Float64 case: the bound now exceeds the deviation and stays of its order
+    deviation, bound, _, _ = oe_tangential_case(Float64, 1e-8, 2000.0, 1.2e-6)
+    @test deviation > 1e-4 && bound <= 1e3 * deviation
+end
+
 @testset "field estimates with boundary data cover the full field error incl. Float32 evaluation (scalar, simd)" begin
     # Before: the rounding of the Float32 field evaluation was not included and the estimate fell below
     # the full error at 2–4 of 7 points (e.g. 2 kHz, scalar kernel: estimate/truth 0.453). Truth here is

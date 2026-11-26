@@ -74,7 +74,9 @@ function galerkin_field_error_bound_cpu(eval_points, pressure_bound::AbstractVec
             radius = norm(r_vec)
             radius == 0.0 && continue
             green = abs(exp(im * k * radius)) / (4pi * radius)
-            projection = abs(dot(r_vec, SVector{3,Float64}(cache.source_normals[source_index]))) / radius
+            normal = SVector{3,Float64}(cache.source_normals[source_index])
+            # computed projection plus its absolute Float64 rounding (cancellation, REVIEW-22-2fd01ac P2)
+            projection = (abs(dot(r_vec, normal)) + _projection_rounding(r_vec, normal)) / radius
             double_layer = green * abs(im * k - inv(radius)) * projection
             face = cache.source_faces[source_index]
             basis = cache.basis_values[source_index]
@@ -89,6 +91,11 @@ function galerkin_field_error_bound_cpu(eval_points, pressure_bound::AbstractVec
     return bounds
 end
 
+# Absolute Float64 rounding bound of `dot(r_vec, normal)` with `r_vec = y − x` itself rounded
+# (relative u per component) and the 3-term sum (γ_3): (u + γ_3(1 + u)) Σ|r_i n_i| <= 8u Σ|r_i n_i|,
+# generous also for the second-order terms of the division by the rounded radius.
+_projection_rounding(r_vec, normal) = 8 * (eps(Float64) / 2) * sum(abs.(r_vec .* normal))
+
 """
     galerkin_field_float64_reference_cpu(eval_points, pressure, neumann, k, cache) -> (values, bound)
 
@@ -102,8 +109,11 @@ approximation of the SIMD kernel), the products with the data and the rounding o
 Not covered: the rounding of `k` and of the geometry to `T` (the operator itself, step 4).
 
 `bound` is a generous first-order bound of the Float64 rounding: per source term
-`(32 + 4 |k| r) u` times its modulus (kernel, phase `k r` with `r` rounded, products) plus `γ_S`
-times the sum of the term moduli for the sequential sum over `S` sources (u = eps(Float64)/2).
+`(32 + 4 |k| r) u` times its modulus (kernel, phase `k r` with `r` rounded, products), plus the
+absolute rounding `8u Σ|r_i n_i| / r` of the normal projection times the rest of the double-layer
+modulus and the pressure modulus (not relative to the computed projection, which can cancel for
+nearly tangential sources), plus `γ_S` times the sum of the term moduli for the sequential sum over
+`S` sources (u = eps(Float64)/2).
 """
 function galerkin_field_float64_reference_cpu(eval_points, pressure::AbstractVector, neumann::AbstractVector,
                                               k, cache::FieldEvaluationCache)
@@ -125,8 +135,12 @@ function galerkin_field_float64_reference_cpu(eval_points, pressure::AbstractVec
             radius = norm(r_vec)
             radius == 0.0 && continue
             green = exp(im * k * radius) / (4pi * radius)
-            projection = dot(r_vec, SVector{3,Float64}(cache.source_normals[source_index])) / radius
+            normal = SVector{3,Float64}(cache.source_normals[source_index])
+            projection = dot(r_vec, normal) / radius
             double_layer = green * (im * k - inv(radius)) * projection
+            # absolute rounding of the projection: under cancellation in dot(r, n) it is not relative
+            # to the computed projection (REVIEW-22-2fd01ac P2), so it is propagated separately
+            projection_error = _projection_rounding(r_vec, normal) / radius
             face = cache.source_faces[source_index]
             basis = cache.basis_values[source_index]
             weight = Float64(cache.source_weights[source_index])
@@ -140,7 +154,8 @@ function galerkin_field_float64_reference_cpu(eval_points, pressure::AbstractVec
                          abs(Float64(basis[3])) * abs(ComplexF64(pressure[face[3]]))) * abs(weight)
             term = abs(double_layer) * p_modulus + abs(green) * abs(q_source)
             magnitude += term
-            term_error += (32 + 4 * abs(k) * radius) * u * term
+            term_error += (32 + 4 * abs(k) * radius) * u * term +
+                          (1 + 8u) * abs(green) * abs(im * k - inv(radius)) * projection_error * p_modulus
         end
         values[point_index] = potential
         bounds[point_index] = (1 + 4u) * (term_error + gamma * magnitude)
