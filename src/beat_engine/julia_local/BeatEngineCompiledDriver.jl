@@ -3561,18 +3561,16 @@ function solve_request_impl(request; event_mode=false)
                     raw_weights = isempty(raw_weight_sweep) ?
                                   get(options, "excitation_weights", Any[]) :
                                   raw_weight_sweep[frequency_index]
+                    # Field values for the error estimate; it runs after the field interval
+                    # closes so its time is only in dense_output_field_error_s, not in field_s.
+                    error_estimate_pressures = nothing
                     if isempty(raw_weights)
                         pressures = [exterior_output_fields!(fields, String(output["id"]),
                             field_points_by_output, bem_mesh, solution.bem_pressure, solution.bem_neumann,
                             coupled_system.wavenumber, coupled_system.field_cache, bem_backend,
                             field_batch, metal_field_batch; metal_field_points=metal_field_points)
                             for (fields, solution) in zip(fields_by_excitation, solutions)]
-                        if use_condensed_solver
-                            field_error_started = time_ns()
-                            BeatEngineCoupledCondensed.field_output_error_diagnostics!(field_error_diagnostics,
-                                coupled_system, String(output["id"]), points, pressures)
-                            field_error_s += (time_ns() - field_error_started) / 1.0e9
-                        end
+                        use_condensed_solver && (error_estimate_pressures = pressures)
                         push!(
                             quantities,
                             quantity_wire(
@@ -3654,6 +3652,12 @@ function solve_request_impl(request; event_mode=false)
                         )
                     end
                     field_s += (time_ns() - field_started) / 1.0e9
+                    if !isnothing(error_estimate_pressures)
+                        field_error_started = time_ns()
+                        BeatEngineCoupledCondensed.field_output_error_diagnostics!(field_error_diagnostics,
+                            coupled_system, String(output["id"]), points, error_estimate_pressures)
+                        field_error_s += (time_ns() - field_error_started) / 1.0e9
+                    end
                 elseif quantity in SPEAKER_ROM_QUANTITIES
                     axes = if quantity == "speaker_rom_k"
                         ["parity_sector", "reduced_row", "reduced_column"]

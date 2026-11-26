@@ -418,3 +418,22 @@ end
         end
     end
 end
+
+@testset "REVIEW-22-04ab6ea P2: field error diagnostics run outside the field_s interval" begin
+    # Section timing: dense_output_field_error_s must not be counted again in field_s.
+    source = read(joinpath(@__DIR__, "..", "BeatEngineCompiledDriver.jl"), String)
+    branch_start = findfirst("elseif quantity == \"exterior_pressure\"", source)
+    @test !isnothing(branch_start)
+    branch_end = findnext("elseif quantity in SPEAKER_ROM_QUANTITIES", source, last(branch_start))
+    branch = source[first(branch_start):first(branch_end)]
+    opened = findall("field_started = time_ns()", branch)
+    closed = findall("field_s += (time_ns() - field_started) / 1.0e9", branch)
+    calls = findall("field_output_error_diagnostics!(", branch)
+    @test length(opened) == 1 && length(closed) == 1 && length(calls) == 1
+    # the diagnostics call lies after the field interval closes, inside its own timer
+    @test first(only(calls)) > last(only(closed))
+    error_open = findall("field_error_started = time_ns()", branch)
+    error_close = findall("field_error_s += (time_ns() - field_error_started) / 1.0e9", branch)
+    @test length(error_open) == 1 && length(error_close) == 1
+    @test last(only(closed)) < first(only(error_open)) < first(only(calls)) < first(only(error_close))
+end
