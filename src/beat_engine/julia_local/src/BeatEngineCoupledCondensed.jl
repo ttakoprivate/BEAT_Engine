@@ -565,15 +565,82 @@ function field_output_error_estimates(system, eval_points, field_values, cache)
     k = system.wavenumber
     estimates = fill(NaN, length(eval_points), excitations)
     for j in 1:excitations
-        length(field_values[j]) == length(eval_points) ||
-            throw(ArgumentError("field_values[$j] has $(length(field_values[j])) points, expected $(length(eval_points))"))
         absolute = galerkin_field_error_bound_cpu(eval_points, view(bounds.pressure, :, j),
                                                   view(bounds.neumann, :, j), k, cache)
-        for i in eachindex(absolute)
-            b = absolute[i]; value = abs(ComplexF64(field_values[j][i]))
-            estimates[i, j] = isnan(b) ? NaN : iszero(b) ? rounding : iszero(value) ? Inf : b / value + rounding
+        _relative_field_estimates!(view(estimates, :, j), absolute, field_values[j], rounding, "field_values[$j]")
+    end
+    return estimates
+end
+
+function _relative_field_estimates!(estimates, absolute, values, rounding, name)
+    length(values) == length(estimates) ||
+        throw(ArgumentError("$name has $(length(values)) points, expected $(length(estimates))"))
+    for i in eachindex(absolute)
+        b = absolute[i]; value = abs(ComplexF64(values[i]))
+        estimates[i] = isnan(b) ? NaN : iszero(b) ? rounding : iszero(value) ? Inf : b / value + rounding
+    end
+    return estimates
+end
+
+"""
+    synthesized_field_output_error_estimates(system, eval_points, field_value, cache, synthesis) -> Matrix{Float64}
+
+Like `field_output_error_estimates`, for an `exterior_pressure` output with excitation weights: the
+driver synthesizes the boundary data `Σ_j ŵ_j x̂_j` in Complex{scalar_type} before one field
+evaluation, so the estimate is a single column (`points × 1`). `synthesis` carries `weights` (the
+weights as used, Complex{scalar_type}), `requested_weights` (as requested, e.g. Float64 from the
+request; defaults to `weights`), and the stored per-excitation boundary data `pressure` and `neumann`
+(vectors of the `bem_pressure`/`bem_neumann` of each excitation). Componentwise, against the exact
+`Σ_j w_j x_j` with the requested weights:
+
+    Σ_j |ŵ_j| b_j + Σ_j |w_j − ŵ_j| (|x̂_j| + b_j) + √2 γ_{n+2} Σ_j |ŵ_j| |x̂_j|,   γ_m = m u / (1 − m u),
+
+with `b_j` the stored per-excitation input bounds, `n` the number of excitations and `u` the unit
+roundoff of the scalar type (the last term bounds the complex products and the running sum of the
+synthesis). A zero used weight contributes no bound term (its products are exactly zero). The
+result is propagated to the field and divided by `|field_value|` as in the per-excitation case;
+`NaN` = unknown, `Inf` = zero field value with a nonzero bound (e.g. exact cancellation of the
+weighted excitations). Not included, as there: field-sum rounding and the Float32 assembly error.
+"""
+function synthesized_field_output_error_estimates(system, eval_points, field_value, cache, synthesis)
+    store = _output_estimate_store(system.factorization)
+    (isnothing(store) || !hasproperty(store, :field_input_bounds)) && return nothing
+    bounds = store.field_input_bounds
+    isnothing(bounds) && return nothing
+    excitations = size(bounds.pressure, 2)
+    weights = synthesis.weights
+    requested = hasproperty(synthesis, :requested_weights) && !isnothing(synthesis.requested_weights) ?
+                synthesis.requested_weights : weights
+    for (name, list) in (("weights", weights), ("requested_weights", requested),
+                         ("pressure", synthesis.pressure), ("neumann", synthesis.neumann))
+        length(list) == excitations ||
+            throw(ArgumentError("synthesis.$name has $(length(list)) excitations, the last solve $excitations"))
+    end
+    T = system.scalar_type
+    u = Float64(eps(T)) / 2
+    pressure_bound = zeros(Float64, size(bounds.pressure, 1)); neumann_bound = zeros(Float64, size(bounds.neumann, 1))
+    pressure_magnitude = zeros(Float64, length(pressure_bound)); neumann_magnitude = zeros(Float64, length(neumann_bound))
+    for j in 1:excitations
+        w = ComplexF64(weights[j]); deviation = abs(ComplexF64(requested[j]) - w)
+        p = abs.(ComplexF64.(synthesis.pressure[j])); q = abs.(ComplexF64.(synthesis.neumann[j]))
+        (length(p) == length(pressure_bound) && length(q) == length(neumann_bound)) ||
+            throw(ArgumentError("synthesis boundary data of excitation $j do not match the stored bounds"))
+        bp = view(bounds.pressure, :, j); bq = view(bounds.neumann, :, j)
+        if !iszero(w)
+            pressure_bound .+= abs(w) .* bp; neumann_bound .+= abs(w) .* bq
+            pressure_magnitude .+= abs(w) .* p; neumann_magnitude .+= abs(w) .* q
+        end
+        if !iszero(deviation)
+            pressure_bound .+= deviation .* (p .+ bp); neumann_bound .+= deviation .* (q .+ bq)
         end
     end
+    m = excitations + 2
+    gamma = sqrt(2.0) * (m * u / (1 - m * u))
+    pressure_bound .+= gamma .* pressure_magnitude; neumann_bound .+= gamma .* neumann_magnitude
+    absolute = galerkin_field_error_bound_cpu(eval_points, pressure_bound, neumann_bound, system.wavenumber, cache)
+    rounding = T === Float64 ? 0.0 : sqrt(2.0) * u
+    estimates = fill(NaN, length(eval_points), 1)
+    _relative_field_estimates!(view(estimates, :, 1), absolute, field_value, rounding, "field_value")
     return estimates
 end
 
@@ -587,9 +654,13 @@ without excitation weights; step 2 of docs/ROADMAP.md, display only). Adds, keye
 `dense_output_recompute_float64_fields` and `dense_output_recompute_float64`. Without a CPU field cache
 (Metal) the output is listed in `dense_output_field_error_not_computed` with the reason instead, and no
 hint is raised for it. Nothing is added when the last solve keeps no bounds (estimate store missing).
+
+With `synthesis` (an output with excitation weights, see `synthesized_field_output_error_estimates`),
+`field_values` holds the one synthesized field, the reported list has a single row, and the output
+id is also recorded in `dense_output_field_error_synthesized` with the number of excitations.
 """
 function field_output_error_diagnostics!(diagnostics::AbstractDict, system, output_id::AbstractString,
-                                         eval_points, field_values)
+                                         eval_points, field_values; synthesis=nothing)
     factorization = hasproperty(system, :factorization) ? system.factorization : nothing
     store = isnothing(factorization) ? nothing : _output_estimate_store(factorization)
     (isnothing(store) || !hasproperty(store, :field_input_bounds) || isnothing(store.field_input_bounds)) &&
@@ -600,8 +671,16 @@ function field_output_error_diagnostics!(diagnostics::AbstractDict, system, outp
         reasons[String(output_id)] = "no CPU field cache for this backend ($(nameof(typeof(cache))))"
         return diagnostics
     end
-    estimates = field_output_error_estimates(system, eval_points, field_values, cache)
+    estimates = if isnothing(synthesis)
+        field_output_error_estimates(system, eval_points, field_values, cache)
+    else
+        length(field_values) == 1 ||
+            throw(ArgumentError("a synthesized output has one field, got $(length(field_values))"))
+        synthesized_field_output_error_estimates(system, eval_points, only(field_values), cache, synthesis)
+    end
     isnothing(estimates) && return diagnostics
+    isnothing(synthesis) || (get!(diagnostics, "dense_output_field_error_synthesized", Dict{String,Any}())[String(output_id)] =
+        length(synthesis.weights))
     threshold = _output_error_hint_threshold()
     hints = [[output_recompute_hint(v, threshold) for v in view(estimates, :, j)] for j in axes(estimates, 2)]
     get!(diagnostics, "dense_output_estimated_relative_error_field", Dict{String,Any}())[String(output_id)] =

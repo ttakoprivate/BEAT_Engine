@@ -437,3 +437,122 @@ end
     @test length(error_open) == 1 && length(error_close) == 1
     @test last(only(closed)) < first(only(error_open)) < first(only(calls)) < first(only(error_close))
 end
+
+@testset "weighted exterior_pressure: synthesized field estimate covers the solver error, cancellation hints" begin
+    # The two excitations are 1 V and 2i V on the same driver, so x₂ = 2i·x₁ exactly (linear system):
+    # weights (1, 0.5i) cancel exactly, (1, 0.5001i) nearly; (1/3, -0.7+0.2i) are not Float32-representable.
+    common = ("BLAB_COUPLED_TRANSDUCER_CONDENSATION" => "1", "BLAB_COUPLED_INTERFACE_FLUX_ELIMINATION" => "1")
+    reference, reference_solutions, _ = oe_coupled(Float32, 2000.0, common...,
+        "BLAB_COUPLED_DENSE_REFINEMENT" => "0", "BLAB_COUPLED_DENSE_FLOAT64" => "1")
+    mesh64 = load_gmsh22_with_tags(joinpath(OE_FIXTURES, "exterior_conforming.msh"), 0.001)
+    cache64 = build_field_evaluation_cache(mesh64, triangle_rule(Float64, reference.regular_quadrature_order))
+    field64(p, q) = evaluate_galerkin_field_cpu(OE_FIELD_POINTS, mesh64, ComplexF64.(p), ComplexF64.(q),
+                                                Float64(reference.wavenumber), cache64)
+    weight_sets = (ComplexF64[1 / 3, -0.7 + 0.2im], ComplexF64[1, 0.5im], ComplexF64[1, 0.5001im], ComplexF64[0, 1])
+    try
+        for solver in ("lu", "gmres"), split in ("auto", "0")
+            solver == "gmres" && split == "0" && continue
+            system, solutions, bem = oe_coupled(Float32, 2000.0, common..., "BLAB_COUPLED_DENSE_REFINEMENT" => "1",
+                "BLAB_COUPLED_DENSE_FLOAT64" => "0", "BLAB_COUPLED_DENSE_SPLIT" => split,
+                "BLAB_COUPLED_DENSE_SOLVER" => solver)
+            gmres = system.factorization isa OE.SplitGMRES && isnothing(system.factorization.fallback)
+            try
+                for requested in weight_sets
+                    weights = ComplexF32.(requested)
+                    # synthesis exactly as in the driver: Complex{T} boundary data before one field evaluation
+                    p = zero(solutions[1].bem_pressure); q = zero(solutions[1].bem_neumann)
+                    for (w, x) in zip(weights, solutions)
+                        p .+= w .* x.bem_pressure; q .+= w .* x.bem_neumann
+                    end
+                    field = evaluate_galerkin_field_cpu(OE_FIELD_POINTS, bem, p, q, system.wavenumber, system.field_cache)
+                    synthesis = (weights=weights, requested_weights=requested,
+                                 pressure=[x.bem_pressure for x in solutions], neumann=[x.bem_neumann for x in solutions])
+                    estimates = OE.synthesized_field_output_error_estimates(system, OE_FIELD_POINTS, field,
+                                                                            system.field_cache, synthesis)
+                    @test size(estimates) == (length(OE_FIELD_POINTS), 1)
+                    if gmres
+                        @test all(isnan, estimates)
+                        continue
+                    end
+                    @test all(e -> e >= sqrt(2) * eps(Float32) / 2, estimates)
+                    # truth: synthesized Float32 boundary data vs the exact synthesis (requested weights) of the
+                    # Float64 solution, both through the same Float64 field evaluation (field-sum rounding excluded)
+                    exact = field64(sum(ComplexF64.(w) .* ComplexF64.(x.bem_pressure) for (w, x) in zip(requested, reference_solutions)),
+                                    sum(ComplexF64.(w) .* ComplexF64.(x.bem_neumann) for (w, x) in zip(requested, reference_solutions)))
+                    if requested == ComplexF64[1, 0.5im]
+                        # exact cancellation: the reference is (rounding-)zero, compare absolutely (Pa);
+                        # a zero synthesized field with a nonzero bound is reported as Inf (unknown size)
+                        absolute = [isinf(e) ? Inf : e * abs(ComplexF64(v)) for (e, v) in zip(estimates[:, 1], field)]
+                        @test all(abs.(field64(p, q) .- exact) .<= absolute)
+                        @test all(isinf(e) for (e, v) in zip(estimates[:, 1], field) if iszero(v))
+                    else
+                        truth = abs.(field64(p, q) .- exact) ./ abs.(exact)
+                        @test all(estimates[:, 1] .>= truth)
+                    end
+                    if requested == ComplexF64[1, 0.5im] || requested == ComplexF64[1, 0.5001im]
+                        # (near) cancellation: the relative estimate is large and the hint is raised
+                        @test all(e -> e > 1e-3, estimates)
+                        @test all(OE.output_recompute_hint(e, 1e-3) for e in estimates)
+                    end
+                    if requested == ComplexF64[0, 1]
+                        # a zero weight drops that excitation: the per-excitation estimate of the other plus at
+                        # most the synthesis rounding term √2 γ₄ (conservative; 0·x and 1·x are exact here)
+                        single = OE.field_output_error_estimates(system, OE_FIELD_POINTS,
+                            [evaluate_galerkin_field_cpu(OE_FIELD_POINTS, bem, x.bem_pressure, x.bem_neumann,
+                                                         system.wavenumber, system.field_cache) for x in solutions],
+                            system.field_cache)
+                        @test all(estimates[:, 1] .>= single[:, 2] .* (1 - 1e-6))
+                        u = Float64(eps(Float32)) / 2; g = sqrt(2) * 4u / (1 - 4u)
+                        stored = OE._output_estimate_store(system.factorization).field_input_bounds
+                        manual = OE.galerkin_field_error_bound_cpu(OE_FIELD_POINTS,
+                            stored.pressure[:, 2] .+ g .* abs.(ComplexF64.(solutions[2].bem_pressure)),
+                            stored.neumann[:, 2] .+ g .* abs.(ComplexF64.(solutions[2].bem_neumann)),
+                            system.wavenumber, system.field_cache) ./ abs.(ComplexF64.(field)) .+ sqrt(2) * u
+                        @test estimates[:, 1] ≈ manual rtol = 1e-12
+                    end
+                end
+                # the requested-weight deviation enlarges the bound: Float32-rounded 1/3 vs the exact third
+                weights = ComplexF32[1 / 3, 0]
+                p = weights[1] .* solutions[1].bem_pressure; q = weights[1] .* solutions[1].bem_neumann
+                field = evaluate_galerkin_field_cpu(OE_FIELD_POINTS, bem, p, q, system.wavenumber, system.field_cache)
+                base = (weights=weights, pressure=[x.bem_pressure for x in solutions], neumann=[x.bem_neumann for x in solutions])
+                as_used = OE.synthesized_field_output_error_estimates(system, OE_FIELD_POINTS, field, system.field_cache, base)
+                as_requested = OE.synthesized_field_output_error_estimates(system, OE_FIELD_POINTS, field, system.field_cache,
+                    merge(base, (requested_weights=ComplexF64[1 / 3, 0],)))
+                gmres || @test all(as_requested .> as_used)
+                # diagnostics: one row per synthesized output, id recorded, hint ORed into the overall flag
+                diagnostics = withenv("BLAB_OUTPUT_ERROR_HINT" => nothing) do
+                    OE.field_output_error_diagnostics!(Dict{String,Any}(), system, "sum", OE_FIELD_POINTS, [field];
+                                                       synthesis=merge(base, (requested_weights=ComplexF64[1 / 3, 0],)))
+                end
+                reported = diagnostics["dense_output_estimated_relative_error_field"]["sum"]
+                @test length(reported) == 1 && length(only(reported)) == length(OE_FIELD_POINTS)
+                @test diagnostics["dense_output_field_error_synthesized"]["sum"] == 2
+                if gmres
+                    @test all(isnothing, only(reported))
+                    @test diagnostics["dense_output_recompute_float64"] === true
+                else
+                    @test only(reported) == as_requested[:, 1]
+                end
+                @test_throws ArgumentError OE.field_output_error_diagnostics!(Dict{String,Any}(), system, "sum",
+                    OE_FIELD_POINTS, [field, field]; synthesis=base)
+                @test_throws ArgumentError OE.synthesized_field_output_error_estimates(system, OE_FIELD_POINTS, field,
+                    system.field_cache, merge(base, (weights=weights[1:1],)))
+            finally
+                release_condensed_coupled_system!(system)
+            end
+        end
+    finally
+        release_condensed_coupled_system!(reference)
+    end
+end
+
+@testset "driver: weighted exterior_pressure passes the synthesis to the field error diagnostics" begin
+    source = read(joinpath(@__DIR__, "..", "BeatEngineCompiledDriver.jl"), String)
+    branch_start = findfirst("elseif quantity == \"exterior_pressure\"", source)
+    branch_end = findnext("elseif quantity in SPEAKER_ROM_QUANTITIES", source, last(branch_start))
+    branch = source[first(branch_start):first(branch_end)]
+    @test occursin("error_estimate_pressures = [pressure]", branch)
+    @test occursin("requested_weights=ComplexF64[", branch)
+    @test occursin("synthesis=error_estimate_synthesis", branch)
+end
