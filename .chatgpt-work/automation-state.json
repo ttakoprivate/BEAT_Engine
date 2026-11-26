@@ -21,39 +21,39 @@
     22
   ],
   "lease": {
-    "holder": "work26-10-mwxbkhkg",
-    "acquired_at": "2026-11-26T08:57:40.336Z",
-    "expires_at": "2026-11-26T10:27:40.336Z",
+    "holder": null,
+    "acquired_at": null,
+    "expires_at": null,
     "fencing_token": 27
   },
   "last_completed_run": {
-    "id": "work26-09-mwx9fysw",
-    "started_at": "2026-11-26T07:58:10.160Z",
-    "completed_at": "2026-11-26T08:01:40.895Z",
-    "status": "zero_scale_metric_fix_verified",
+    "id": "work26-10-mwxbkhkg",
+    "started_at": "2026-11-26T08:57:40.336Z",
+    "completed_at": "2026-11-26T09:06:27.150Z",
+    "status": "field_diagnostic_wiring_review_changes_requested",
     "source_commit": "b34abee291207a13876068c99948d8ca386756fa",
     "checked_heads": {
       "9": "3d639cef853f6c60caa36fda4a8b39f28baec3f7",
       "14": "b2b756da7076cab3b32a63c822ec91af36a7e6ce",
       "19": "7afbaf4b3d88b1f15e39c12ab9a2a47473b336c9",
-      "22": "d73eacc8eb21fa795377a2d808268b0348cd5179",
+      "22": "04ab6ea2768d5ed035932d9937558dfef5895170",
       "23": "dd351b9e7b7ef704c1d228b675b7a89719b6a7d5"
     },
     "source_changes": false,
     "tests_rerun": true,
     "actions": [
       {
-        "pr": 23,
-        "commit": "dd351b9e7b7ef704c1d228b675b7a89719b6a7d5",
-        "review_id": 6070381227,
-        "url": "https://github.com/ttakoprivate/BEAT_Engine/pull/23#pullrequestreview-6070381227",
-        "review_state": "COMMENT"
+        "pr": 22,
+        "commit": "04ab6ea2768d5ed035932d9937558dfef5895170",
+        "review_id": 6071186270,
+        "url": "https://github.com/ttakoprivate/BEAT_Engine/pull/22#pullrequestreview-6071186270",
+        "review_state": "CHANGES_REQUESTED"
       }
     ],
-    "evidence": "Fresh clone T0800, official SHA256 Julia1.12.6, new own depot. Pure two-test-file change. AST-selected unchanged metric functions and four metric testsets:16 repository+16 own zero-scale/phase/threshold checks+4 parent reproductions=36passed,exit0,no skips/Broken. Original parent01ccb01 NaN/significant_count3 reproduced; current zeros return0/count0/zero_count3. Complex null errors max4e-15 inputunits reported absolute. First harness exit1 after32passes due Julia world-age calling dynamically loaded parent; fixed temporary harness invokelatest, rerun36pass. No project edits, no numerical baseline/solver changes. Full solver suites/referencegate/Python not repeated; previous field metrics not claimed current. No hardware/h343/performance qualification.",
+    "evidence": "Fresh cloneT0900, official SHA256 Julia1.12.6, new own depot, CPU instantiate exit0. Unchanged output_error_estimate_tests395passed/no skips/Broken; combined harness then exit1 due own AST extraction missing module traversal. Corrected own probes run exit0:8 JSON/OR/noCPU/missingbounds +3 synthetic clock accounting repro=11. Total406passed assertions across steps, not combined exit0. P2 actual unmodified exterior_pressure branch starts field timer before new field diagnostics and adds field_s afterwards; artificial field2+diagnostic3 yields field_s5 and field_error_s3, double-counted section attribution. No real performance claim. Request move diagnostic outside interval or subtract. 2point3exc JSON roundtrip validates orientation/null/Inf-clamp and preserving true overall OR, distinct IDs, noCPUreason and no missingbounds diagnostics. Sourceclean. No end-to-end request/fullgate/Python or independent physical reference/GPU/h343/performance qualification.",
     "pending": [
       "PR23 N1 zero-scale metric edge resolved and independently verified atdd351b9;other H solver/runtime/hardware qualifications open.",
-      "PR22 field fixes confirmed atd73eacc;heuristic/h-mass-solve/fieldarithmetic/assembly/hardware limits remain.",
+      "PR22 new04ab6ea wiring reviewed6071186270: REQUEST_CHANGES P2 field_s includes new diagnostic duration also reported separately. JSON/OR/cache cases verified. Existing heuristic/h-mass-solve/fieldarithmetic/assembly/hardware limits remain.",
       "PR14 N1/N2b2b756d awaits independent follow-up;row-quadrature/adjoint review and h343 qualification open.",
       "PR19 numerical/export findings and owner split/merge decision open;three ROM fixes verified.",
       "Issue12 VACS sample/format answers pending;PR17 merged;PR9 roadmap update planned."
