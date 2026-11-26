@@ -3565,13 +3565,18 @@ function solve_request_impl(request; event_mode=false)
                     # closes so its time is only in dense_output_field_error_s, not in field_s.
                     error_estimate_pressures = nothing
                     error_estimate_synthesis = nothing
+                    error_estimate_boundary = nothing
                     if isempty(raw_weights)
                         pressures = [exterior_output_fields!(fields, String(output["id"]),
                             field_points_by_output, bem_mesh, solution.bem_pressure, solution.bem_neumann,
                             coupled_system.wavenumber, coupled_system.field_cache, bem_backend,
                             field_batch, metal_field_batch; metal_field_points=metal_field_points)
                             for (fields, solution) in zip(fields_by_excitation, solutions)]
-                        use_condensed_solver && (error_estimate_pressures = pressures)
+                        if use_condensed_solver
+                            error_estimate_pressures = pressures
+                            error_estimate_boundary = [(solution.bem_pressure, solution.bem_neumann)
+                                                       for solution in solutions]
+                        end
                         push!(
                             quantities,
                             quantity_wire(
@@ -3641,6 +3646,7 @@ function solve_request_impl(request; event_mode=false)
                         end
                         if use_condensed_solver
                             error_estimate_pressures = [pressure]
+                            error_estimate_boundary = (combined_pressure, combined_neumann)
                             error_estimate_synthesis = (
                                 weights=weights,
                                 requested_weights=ComplexF64[
@@ -3670,7 +3676,7 @@ function solve_request_impl(request; event_mode=false)
                         field_error_started = time_ns()
                         BeatEngineCoupledCondensed.field_output_error_diagnostics!(field_error_diagnostics,
                             coupled_system, String(output["id"]), points, error_estimate_pressures;
-                            synthesis=error_estimate_synthesis)
+                            synthesis=error_estimate_synthesis, boundary_data=error_estimate_boundary)
                         field_error_s += (time_ns() - field_error_started) / 1.0e9
                     end
                 elseif quantity in SPEAKER_ROM_QUANTITIES

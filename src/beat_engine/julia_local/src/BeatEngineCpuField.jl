@@ -88,3 +88,62 @@ function galerkin_field_error_bound_cpu(eval_points, pressure_bound::AbstractVec
     end
     return bounds
 end
+
+"""
+    galerkin_field_float64_reference_cpu(eval_points, pressure, neumann, k, cache) -> (values, bound)
+
+Float64 evaluation of the field representation of `evaluate_galerkin_field_cpu` from the given
+boundary data (step 2 of docs/ROADMAP.md, display only), with a bound of its own Float64 rounding.
+Same quadrature sources as `cache` (its stored geometry, converted exactly to Float64), the
+wavenumber `k` as given and the evaluation points as given (not rounded to the cache precision).
+`|field_T − values| + bound` therefore covers every rounding of a field evaluation in the cache
+precision `T` from the same stored data: the field sum, the kernel (phase `k r`, `1/r`, sincos
+approximation of the SIMD kernel), the products with the data and the rounding of the points.
+Not covered: the rounding of `k` and of the geometry to `T` (the operator itself, step 4).
+
+`bound` is a generous first-order bound of the Float64 rounding: per source term
+`(32 + 4 |k| r) u` times its modulus (kernel, phase `k r` with `r` rounded, products) plus `γ_S`
+times the sum of the term moduli for the sequential sum over `S` sources (u = eps(Float64)/2).
+"""
+function galerkin_field_float64_reference_cpu(eval_points, pressure::AbstractVector, neumann::AbstractVector,
+                                              k, cache::FieldEvaluationCache)
+    k = ComplexF64(outgoing_wavenumber(k))
+    point_count = length(eval_points)
+    values = Vector{ComplexF64}(undef, point_count)
+    bounds = zeros(Float64, point_count)
+    source_count = length(cache.source_points)
+    u = eps(Float64) / 2
+    gamma = source_count * u / (1 - source_count * u)
+    Threads.@threads for point_index in 1:point_count
+        x = SVector{3,Float64}(Float64(eval_points[point_index][1]), Float64(eval_points[point_index][2]),
+                               Float64(eval_points[point_index][3]))
+        potential = zero(ComplexF64)
+        magnitude = 0.0
+        term_error = 0.0
+        for source_index in 1:source_count
+            r_vec = SVector{3,Float64}(cache.source_points[source_index]) - x
+            radius = norm(r_vec)
+            radius == 0.0 && continue
+            green = exp(im * k * radius) / (4pi * radius)
+            projection = dot(r_vec, SVector{3,Float64}(cache.source_normals[source_index])) / radius
+            double_layer = green * (im * k - inv(radius)) * projection
+            face = cache.source_faces[source_index]
+            basis = cache.basis_values[source_index]
+            weight = Float64(cache.source_weights[source_index])
+            p_source = (Float64(basis[1]) * ComplexF64(pressure[face[1]]) +
+                        Float64(basis[2]) * ComplexF64(pressure[face[2]]) +
+                        Float64(basis[3]) * ComplexF64(pressure[face[3]])) * weight
+            q_source = ComplexF64(neumann[cache.source_elements[source_index]]) * weight
+            potential += double_layer * p_source - green * q_source
+            p_modulus = (abs(Float64(basis[1])) * abs(ComplexF64(pressure[face[1]])) +
+                         abs(Float64(basis[2])) * abs(ComplexF64(pressure[face[2]])) +
+                         abs(Float64(basis[3])) * abs(ComplexF64(pressure[face[3]]))) * abs(weight)
+            term = abs(double_layer) * p_modulus + abs(green) * abs(q_source)
+            magnitude += term
+            term_error += (32 + 4 * abs(k) * radius) * u * term
+        end
+        values[point_index] = potential
+        bounds[point_index] = (1 + 4u) * (term_error + gamma * magnitude)
+    end
+    return values, bounds
+end

@@ -594,3 +594,108 @@ end
     _, bound = check(Float32, ComplexF64[0, 1], [ComplexF32[1e-30, 0], ComplexF32[0, 0]])
     @test all(iszero, bound)
 end
+
+@testset "field evaluation rounding: Float64 reference of the same data and its rounding bound vs BigFloat" begin
+    # galerkin_field_float64_reference_cpu: same cache sources, points as given; its bound covers the
+    # deviation from a BigFloat evaluation of the same representation (k = 2 kHz, Float32 cache).
+    mesh = load_gmsh22_with_tags(joinpath(OE_FIXTURES, "exterior_conforming.msh"), 0.001f0)
+    cache = build_field_evaluation_cache(mesh, triangle_rule(Float32, 1))
+    rng = MersenneTwister(2611)
+    p = randn(rng, ComplexF32, length(mesh.vertices)); q = randn(rng, ComplexF32, length(mesh.faces))
+    k = Float32(2pi * 2000 / 343)
+    values, bound = OE.galerkin_field_float64_reference_cpu(OE_FIELD_POINTS, p, q, k, cache)
+    big_field = setprecision(BigFloat, 256) do
+        kk = BigFloat(OE.outgoing_wavenumber(k))
+        map(OE_FIELD_POINTS) do point
+            x = BigFloat.(point); total = zero(Complex{BigFloat})
+            for s in eachindex(cache.source_points)
+                r_vec = BigFloat.(cache.source_points[s]) .- x; r = sqrt(sum(abs2, r_vec))
+                g = cis(kk * r) / (4 * BigFloat(pi) * r)
+                dl = g * (im * kk - 1 / r) * (sum(r_vec .* BigFloat.(cache.source_normals[s])) / r)
+                face = cache.source_faces[s]; b = BigFloat.(cache.basis_values[s]); w = BigFloat(cache.source_weights[s])
+                ps = (b[1] * Complex{BigFloat}(p[face[1]]) + b[2] * Complex{BigFloat}(p[face[2]]) +
+                      b[3] * Complex{BigFloat}(p[face[3]])) * w
+                total += dl * ps - g * Complex{BigFloat}(q[cache.source_elements[s]]) * w
+            end
+            total
+        end
+    end
+    deviation = Float64.(abs.(Complex{BigFloat}.(values) .- big_field))
+    @test all(deviation .<= bound)
+    @test all(bound .<= 1e-9 .* abs.(values))     # the Float64 term stays negligible here
+    # the Float32 kernels agree with the reference only to Float32 accuracy (the term being added)
+    for kernel in (:scalar, :simd)
+        field32 = evaluate_galerkin_field_cpu(OE_FIELD_POINTS, mesh, p, q, k, cache; kernel)
+        @test maximum(abs.(ComplexF64.(field32) .- values) ./ abs.(values)) > 1e-9
+    end
+end
+
+@testset "field estimates with boundary data cover the full field error incl. Float32 evaluation (scalar, simd)" begin
+    # Before: the rounding of the Float32 field evaluation was not included and the estimate fell below
+    # the full error at 2–4 of 7 points (e.g. 2 kHz, scalar kernel: estimate/truth 0.453). Truth here is
+    # the Float32 field of the stored data against the Float64 field (Float64 geometry) of the Float64 solve.
+    common = ("BLAB_COUPLED_TRANSDUCER_CONDENSATION" => "1", "BLAB_COUPLED_INTERFACE_FLUX_ELIMINATION" => "1")
+    mesh64 = load_gmsh22_with_tags(joinpath(OE_FIXTURES, "exterior_conforming.msh"), 0.001)
+    for frequency in (2000.0, 6000.0)
+        reference, reference_solutions, _ = oe_coupled(Float32, frequency, common...,
+            "BLAB_COUPLED_DENSE_REFINEMENT" => "0", "BLAB_COUPLED_DENSE_FLOAT64" => "1")
+        cache64 = build_field_evaluation_cache(mesh64, triangle_rule(Float64, reference.regular_quadrature_order))
+        exact = [evaluate_galerkin_field_cpu(OE_FIELD_POINTS, mesh64, ComplexF64.(x.bem_pressure), ComplexF64.(x.bem_neumann),
+                                             Float64(reference.wavenumber), cache64) for x in reference_solutions]
+        system, solutions, bem = oe_coupled(Float32, frequency, common..., "BLAB_COUPLED_DENSE_REFINEMENT" => "1",
+                                            "BLAB_COUPLED_DENSE_FLOAT64" => "0")
+        try
+            data = [(x.bem_pressure, x.bem_neumann) for x in solutions]
+            missed_before = 0
+            for kernel in (:scalar, :simd)
+                fields = [evaluate_galerkin_field_cpu(OE_FIELD_POINTS, bem, x.bem_pressure, x.bem_neumann,
+                                                      system.wavenumber, system.field_cache; kernel) for x in solutions]
+                without = OE.field_output_error_estimates(system, OE_FIELD_POINTS, fields, system.field_cache)
+                with = OE.field_output_error_estimates(system, OE_FIELD_POINTS, fields, system.field_cache; boundary_data=data)
+                @test all(with .>= without)
+                for j in 1:2
+                    truth = abs.(ComplexF64.(fields[j]) .- exact[j]) ./ abs.(exact[j])
+                    @test all(with[:, j] .>= truth)
+                    missed_before += count(without[:, j] .< truth)
+                end
+                @test_throws ArgumentError OE.field_output_error_estimates(system, OE_FIELD_POINTS, fields,
+                    system.field_cache; boundary_data=data[1:1])
+                # diagnostics record whether the evaluation rounding is part of the estimate
+                diagnostics = withenv("BLAB_OUTPUT_ERROR_HINT" => nothing) do
+                    d = OE.field_output_error_diagnostics!(Dict{String,Any}(), system, "with", OE_FIELD_POINTS, fields;
+                                                           boundary_data=data)
+                    OE.field_output_error_diagnostics!(d, system, "without", OE_FIELD_POINTS, fields)
+                end
+                @test diagnostics["dense_output_field_evaluation_rounding_included"] == Dict("with" => true, "without" => false)
+                @test diagnostics["dense_output_estimated_relative_error_field"]["with"] == [with[:, j] for j in 1:2]
+                # synthesized output: the same term from the synthesized data
+                weights = ComplexF32[1 / 3, -0.7f0 + 0.2f0im]
+                p = zero(solutions[1].bem_pressure); q = zero(solutions[1].bem_neumann)
+                for (w, x) in zip(weights, solutions)
+                    p .+= w .* x.bem_pressure; q .+= w .* x.bem_neumann
+                end
+                field = evaluate_galerkin_field_cpu(OE_FIELD_POINTS, bem, p, q, system.wavenumber, system.field_cache; kernel)
+                synthesis = (weights=weights, requested_weights=ComplexF64.(weights),
+                             pressure=[x.bem_pressure for x in solutions], neumann=[x.bem_neumann for x in solutions])
+                synthesized = OE.synthesized_field_output_error_estimates(system, OE_FIELD_POINTS, field, system.field_cache,
+                                                                          synthesis; boundary_data=(p, q))
+                exact_sum = sum(ComplexF64(w) .* e for (w, e) in zip(weights, exact))
+                @test all(synthesized[:, 1] .>= abs.(ComplexF64.(field) .- exact_sum) ./ abs.(exact_sum))
+            end
+            @test missed_before > 0          # the case the new term is for actually occurs on this fixture
+        finally
+            release_condensed_coupled_system!(system)
+            release_condensed_coupled_system!(reference)
+        end
+    end
+end
+
+@testset "driver passes the boundary data of the field evaluation to the field error diagnostics" begin
+    source = read(joinpath(@__DIR__, "..", "BeatEngineCompiledDriver.jl"), String)
+    branch_start = findfirst("elseif quantity == \"exterior_pressure\"", source)
+    branch_end = findnext("elseif quantity in SPEAKER_ROM_QUANTITIES", source, last(branch_start))
+    branch = source[first(branch_start):first(branch_end)]
+    @test occursin("error_estimate_boundary = [(solution.bem_pressure, solution.bem_neumann)", branch)
+    @test occursin("error_estimate_boundary = (combined_pressure, combined_neumann)", branch)
+    @test occursin("boundary_data=error_estimate_boundary", branch)
+end

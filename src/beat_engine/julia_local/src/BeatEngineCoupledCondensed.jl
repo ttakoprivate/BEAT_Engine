@@ -549,10 +549,15 @@ are the field values of excitation `j` at `eval_points` (as returned by the fiel
 data (`_field_input_bounds`) are propagated by `galerkin_field_error_bound_cpu` and divided by
 `|field value|`; the complex rounding √2 u of storing the field as Complex{scalar_type} is added.
 `NaN` = unknown (no componentwise bound, e.g. GMRES without fallback); `Inf` where the field value
-is zero but its bound is not. Not included: the rounding of the field sum and the Float32 assembly
-error (step 4). Returns `nothing` when the factorization keeps no bounds.
+is zero but its bound is not. Returns `nothing` when the factorization keeps no bounds.
+
+With `boundary_data` (per excitation `(pressure, neumann)`, the stored boundary data the field was
+evaluated from) the rounding of the field evaluation itself (field sum, kernel, evaluation points) is
+added: `|field value − Float64 field| + bound` from `galerkin_field_float64_reference_cpu` on the same
+data. Without it that term is not included. Not included either way: the Float32 assembly error and
+the rounding of the wavenumber and geometry to the scalar type (step 4).
 """
-function field_output_error_estimates(system, eval_points, field_values, cache)
+function field_output_error_estimates(system, eval_points, field_values, cache; boundary_data=nothing)
     store = _output_estimate_store(system.factorization)
     (isnothing(store) || !hasproperty(store, :field_input_bounds)) && return nothing
     bounds = store.field_input_bounds
@@ -563,13 +568,27 @@ function field_output_error_estimates(system, eval_points, field_values, cache)
     T = system.scalar_type
     rounding = T === Float64 ? 0.0 : sqrt(2.0) * Float64(eps(T)) / 2
     k = system.wavenumber
+    isnothing(boundary_data) || length(boundary_data) == excitations ||
+        throw(ArgumentError("boundary_data has $(length(boundary_data)) excitations, the last solve $excitations"))
     estimates = fill(NaN, length(eval_points), excitations)
     for j in 1:excitations
         absolute = galerkin_field_error_bound_cpu(eval_points, view(bounds.pressure, :, j),
                                                   view(bounds.neumann, :, j), k, cache)
+        isnothing(boundary_data) ||
+            (absolute .+= _field_evaluation_rounding(eval_points, field_values[j], boundary_data[j], k, cache))
         _relative_field_estimates!(view(estimates, :, j), absolute, field_values[j], rounding, "field_values[$j]")
     end
     return estimates
+end
+
+# Rounding of the field evaluation from the stored boundary data `(pressure, neumann)`, measured
+# against the Float64 evaluation of the same data plus that evaluation's own rounding bound.
+function _field_evaluation_rounding(eval_points, values, data, k, cache)
+    pressure, neumann = data
+    length(values) == length(eval_points) ||
+        throw(ArgumentError("field values have $(length(values)) points, expected $(length(eval_points))"))
+    reference, reference_bound = galerkin_field_float64_reference_cpu(eval_points, pressure, neumann, k, cache)
+    return abs.(ComplexF64.(values) .- reference) .+ reference_bound
 end
 
 function _relative_field_estimates!(estimates, absolute, values, rounding, name)
@@ -602,9 +621,12 @@ up to half the smallest subnormal `η` of the scalar type, so every nonzero prod
 `2η(1 + γ_{n+2})` per component (`√2 η` for the two real products of each part, rounded up). A zero used weight contributes no bound term (its products are exactly zero). The
 result is propagated to the field and divided by `|field_value|` as in the per-excitation case;
 `NaN` = unknown, `Inf` = zero field value with a nonzero bound (e.g. exact cancellation of the
-weighted excitations). Not included, as there: field-sum rounding and the Float32 assembly error.
+weighted excitations). With `boundary_data = (pressure, neumann)`, the synthesized Complex{scalar_type}
+boundary data the field was evaluated from, the rounding of the field evaluation is added as in the
+per-excitation case. Not included, as there: the Float32 assembly error.
 """
-function synthesized_field_output_error_estimates(system, eval_points, field_value, cache, synthesis)
+function synthesized_field_output_error_estimates(system, eval_points, field_value, cache, synthesis;
+                                                  boundary_data=nothing)
     store = _output_estimate_store(system.factorization)
     (isnothing(store) || !hasproperty(store, :field_input_bounds)) && return nothing
     bounds = store.field_input_bounds
@@ -623,6 +645,8 @@ function synthesized_field_output_error_estimates(system, eval_points, field_val
     pressure_bound = _synthesized_boundary_bound(T, weights, requested, synthesis.pressure, bounds.pressure, "pressure")
     neumann_bound = _synthesized_boundary_bound(T, weights, requested, synthesis.neumann, bounds.neumann, "neumann")
     absolute = galerkin_field_error_bound_cpu(eval_points, pressure_bound, neumann_bound, system.wavenumber, cache)
+    isnothing(boundary_data) ||
+        (absolute .+= _field_evaluation_rounding(eval_points, field_value, boundary_data, system.wavenumber, cache))
     rounding = T === Float64 ? 0.0 : sqrt(2.0) * u
     estimates = fill(NaN, length(eval_points), 1)
     _relative_field_estimates!(view(estimates, :, 1), absolute, field_value, rounding, "field_value")
@@ -671,9 +695,13 @@ hint is raised for it. Nothing is added when the last solve keeps no bounds (est
 With `synthesis` (an output with excitation weights, see `synthesized_field_output_error_estimates`),
 `field_values` holds the one synthesized field, the reported list has a single row, and the output
 id is also recorded in `dense_output_field_error_synthesized` with the number of excitations.
+
+`boundary_data` is passed on to the estimate (per excitation `(pressure, neumann)`, or one pair for a
+synthesized output); `dense_output_field_evaluation_rounding_included[output_id]` records whether the
+rounding of the field evaluation is part of the estimate.
 """
 function field_output_error_diagnostics!(diagnostics::AbstractDict, system, output_id::AbstractString,
-                                         eval_points, field_values; synthesis=nothing)
+                                         eval_points, field_values; synthesis=nothing, boundary_data=nothing)
     factorization = hasproperty(system, :factorization) ? system.factorization : nothing
     store = isnothing(factorization) ? nothing : _output_estimate_store(factorization)
     (isnothing(store) || !hasproperty(store, :field_input_bounds) || isnothing(store.field_input_bounds)) &&
@@ -685,13 +713,16 @@ function field_output_error_diagnostics!(diagnostics::AbstractDict, system, outp
         return diagnostics
     end
     estimates = if isnothing(synthesis)
-        field_output_error_estimates(system, eval_points, field_values, cache)
+        field_output_error_estimates(system, eval_points, field_values, cache; boundary_data)
     else
         length(field_values) == 1 ||
             throw(ArgumentError("a synthesized output has one field, got $(length(field_values))"))
-        synthesized_field_output_error_estimates(system, eval_points, only(field_values), cache, synthesis)
+        synthesized_field_output_error_estimates(system, eval_points, only(field_values), cache, synthesis;
+                                                 boundary_data)
     end
     isnothing(estimates) && return diagnostics
+    get!(diagnostics, "dense_output_field_evaluation_rounding_included", Dict{String,Any}())[String(output_id)] =
+        !isnothing(boundary_data)
     isnothing(synthesis) || (get!(diagnostics, "dense_output_field_error_synthesized", Dict{String,Any}())[String(output_id)] =
         length(synthesis.weights))
     threshold = _output_error_hint_threshold()
