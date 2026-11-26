@@ -21,38 +21,38 @@
     22
   ],
   "lease": {
-    "holder": "work26-09-mwx9fysw",
-    "acquired_at": "2026-11-26T07:58:10.160Z",
-    "expires_at": "2026-11-26T09:28:10.160Z",
+    "holder": null,
+    "acquired_at": null,
+    "expires_at": null,
     "fencing_token": 26
   },
   "last_completed_run": {
-    "id": "work25-22-mwwm35py",
-    "started_at": "2026-11-25T21:04:21.430Z",
-    "completed_at": "2026-11-25T21:16:36.339Z",
-    "status": "remainder_reporting_followup_verified",
+    "id": "work26-09-mwx9fysw",
+    "started_at": "2026-11-26T07:58:10.160Z",
+    "completed_at": "2026-11-26T08:01:40.895Z",
+    "status": "zero_scale_metric_fix_verified",
     "source_commit": "b34abee291207a13876068c99948d8ca386756fa",
     "checked_heads": {
       "9": "3d639cef853f6c60caa36fda4a8b39f28baec3f7",
       "14": "b2b756da7076cab3b32a63c822ec91af36a7e6ce",
       "19": "7afbaf4b3d88b1f15e39c12ab9a2a47473b336c9",
       "22": "d73eacc8eb21fa795377a2d808268b0348cd5179",
-      "23": "01ccb01ca0bdba2233237640a5f12f01293d75f6"
+      "23": "dd351b9e7b7ef704c1d228b675b7a89719b6a7d5"
     },
     "source_changes": false,
     "tests_rerun": true,
     "actions": [
       {
         "pr": 23,
-        "commit": "01ccb01ca0bdba2233237640a5f12f01293d75f6",
-        "review_id": 6065092992,
-        "url": "https://github.com/ttakoprivate/BEAT_Engine/pull/23#pullrequestreview-6065092992",
+        "commit": "dd351b9e7b7ef704c1d228b675b7a89719b6a7d5",
+        "review_id": 6070381227,
+        "url": "https://github.com/ttakoprivate/BEAT_Engine/pull/23#pullrequestreview-6070381227",
         "review_state": "COMMENT"
       }
     ],
-    "evidence": "Fresh clone T2105, official SHA256 Julia1.12.6, own new depot+optionalenv; instantiate exit0. Unchanged H-hook159+external4+4+372+own24=563passed,exit0,no skips/Broken. New P2 report fix confirmed: full pointwise nonzero ratios5/2.828427/4.472136 and absolute/unit/zero errors visible; separate significant-vs-rounding-residue fixture acceptance explicit. Phase and threshold-edge probes pass. N1 optional reproduced both test helpers: all-zero vectors and total_scale0 produce relative_significantNaN/significant_count3 via 0/0; suggest nonzero mask and regression, no solver failure. Dense500Hz pressure remainder pointwise8.246211,abs1.425416e-14Pa,6 exactzeros max1.776357e-15Pa. Sourceclean; only2testfiles changed; no repeated full gate/Python; prior4394 gate belongs a2b222e. No independent physical H-replay reference/GPU/h343/performance qualification.",
+    "evidence": "Fresh clone T0800, official SHA256 Julia1.12.6, new own depot. Pure two-test-file change. AST-selected unchanged metric functions and four metric testsets:16 repository+16 own zero-scale/phase/threshold checks+4 parent reproductions=36passed,exit0,no skips/Broken. Original parent01ccb01 NaN/significant_count3 reproduced; current zeros return0/count0/zero_count3. Complex null errors max4e-15 inputunits reported absolute. First harness exit1 after32passes due Julia world-age calling dynamically loaded parent; fixed temporary harness invokelatest, rerun36pass. No project edits, no numerical baseline/solver changes. Full solver suites/referencegate/Python not repeated; previous field metrics not claimed current. No hardware/h343/performance qualification.",
     "pending": [
-      "PR23 P2 from a2b222e resolved on01ccb01. Optional N1 zero-scale test-helper edge reported in6065092992. Other H solver/runtime/hardware qualifications open.",
+      "PR23 N1 zero-scale metric edge resolved and independently verified atdd351b9;other H solver/runtime/hardware qualifications open.",
       "PR22 field fixes confirmed atd73eacc;heuristic/h-mass-solve/fieldarithmetic/assembly/hardware limits remain.",
       "PR14 N1/N2b2b756d awaits independent follow-up;row-quadrature/adjoint review and h343 qualification open.",
       "PR19 numerical/export findings and owner split/merge decision open;three ROM fixes verified.",
