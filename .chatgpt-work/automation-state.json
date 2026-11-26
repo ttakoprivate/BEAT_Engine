@@ -21,10 +21,10 @@
     22
   ],
   "lease": {
-    "holder": null,
-    "acquired_at": null,
-    "expires_at": null,
-    "fencing_token": 25
+    "holder": "work26-09-mwx9fysw",
+    "acquired_at": "2026-11-26T07:58:10.160Z",
+    "expires_at": "2026-11-26T09:28:10.160Z",
+    "fencing_token": 26
   },
   "last_completed_run": {
     "id": "work25-22-mwwm35py",
