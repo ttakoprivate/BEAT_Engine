@@ -37,7 +37,8 @@ function hook_remainder_error(reference, candidate, total_scale; cancellation=1e
     length(r) == length(c) || error("Output lengths differ: $(length(r)) vs $(length(c)).")
     err = abs.(c .- r)
     nonzero = .!iszero.(r)
-    significant = abs.(r) .>= cancellation * total_scale
+    # Exact zeros are never significant, also when total_scale == 0 (all-zero output, review N1).
+    significant = nonzero .& (abs.(r) .>= cancellation * total_scale)
     return (relative=maximum(err[nonzero] ./ abs.(r[nonzero]); init=0.0),
             relative_significant=maximum(err[significant] ./ abs.(r[significant]); init=0.0),
             significant_count=count(significant), residue_count=count(nonzero .& .!significant),
@@ -58,6 +59,18 @@ const HOOK_OUTPUTS = (:fem_pressure, :bem_pressure, :bem_neumann, :interface_flu
 const HOOK_TOL = parse(Float64, get(ENV, "HMAT_TOL", "1e-6"))
 # Acceptance bound for this fixture at HMAT_TOL=1e-6 and GMRES rtol 1e-9 (pointwise, every output).
 const HOOK_BOUND = parse(Float64, get(ENV, "HMAT_HOOK_BOUND", "1e-4"))
+
+@testset "remainder metric at zero scale (review N1, REVIEW-23-01ccb01)" begin
+    z = hook_remainder_error(zeros(ComplexF64, 3), zeros(ComplexF64, 3), 0.0)
+    @test z.relative_significant == 0.0 && z.significant_count == 0 && z.residue_count == 0 && z.zero_count == 3
+    @test z.relative == 0.0 && z.absolute == 0.0 && z.absolute_residue == 0.0
+    # Zero scale with a nonzero error at an exact zero: reported absolutely, never as NaN.
+    w = hook_remainder_error(zeros(ComplexF64, 2), ComplexF64[0, 1e-15], 0.0)
+    @test !isnan(w.relative_significant) && w.significant_count == 0 && w.absolute_at_zero == 1e-15
+    # Exact zeros stay out of the significant set at a positive scale too.
+    p = hook_remainder_error(ComplexF64[1, 0], ComplexF64[1, 0], 1.0)
+    @test p.significant_count == 1 && p.zero_count == 1
+end
 
 with_baseline_cpu_coupled() do
     fem = load_gmsh41_volume(joinpath(CONDENSED_FIXTURE_ROOT, "femvolume.msh"), 0.001)
