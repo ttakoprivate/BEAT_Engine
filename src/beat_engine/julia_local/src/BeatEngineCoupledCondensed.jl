@@ -577,6 +577,44 @@ function field_output_error_estimates(system, eval_points, field_values, cache)
     return estimates
 end
 
+"""
+    field_output_error_diagnostics!(diagnostics, system, output_id, eval_points, field_values) -> diagnostics
+
+Driver wiring of `field_output_error_estimates` for one per-excitation field output (`exterior_pressure`
+without excitation weights; step 2 of docs/ROADMAP.md, display only). Adds, keyed by `output_id`:
+`dense_output_estimated_relative_error_field[output_id]` (`excitation → point`, `null` = unknown) and
+`dense_output_recompute_float64_field[output_id]`, and ORs the hints into
+`dense_output_recompute_float64_fields` and `dense_output_recompute_float64`. Without a CPU field cache
+(Metal) the output is listed in `dense_output_field_error_not_computed` with the reason instead, and no
+hint is raised for it. Nothing is added when the last solve keeps no bounds (estimate store missing).
+"""
+function field_output_error_diagnostics!(diagnostics::AbstractDict, system, output_id::AbstractString,
+                                         eval_points, field_values)
+    factorization = hasproperty(system, :factorization) ? system.factorization : nothing
+    store = isnothing(factorization) ? nothing : _output_estimate_store(factorization)
+    (isnothing(store) || !hasproperty(store, :field_input_bounds) || isnothing(store.field_input_bounds)) &&
+        return diagnostics
+    cache = hasproperty(system, :field_cache) ? system.field_cache : nothing
+    if !(cache isa BeatEngineCore.FieldEvaluationCache)
+        reasons = get!(diagnostics, "dense_output_field_error_not_computed", Dict{String,Any}())
+        reasons[String(output_id)] = "no CPU field cache for this backend ($(nameof(typeof(cache))))"
+        return diagnostics
+    end
+    estimates = field_output_error_estimates(system, eval_points, field_values, cache)
+    isnothing(estimates) && return diagnostics
+    threshold = _output_error_hint_threshold()
+    hints = [[output_recompute_hint(v, threshold) for v in view(estimates, :, j)] for j in axes(estimates, 2)]
+    get!(diagnostics, "dense_output_estimated_relative_error_field", Dict{String,Any}())[String(output_id)] =
+        [Union{Nothing,Float64}[isnan(v) ? nothing : (isinf(v) ? floatmax(Float64) : v) for v in view(estimates, :, j)]
+         for j in axes(estimates, 2)]
+    get!(diagnostics, "dense_output_recompute_float64_field", Dict{String,Any}())[String(output_id)] = hints
+    diagnostics["dense_output_error_hint_threshold"] = threshold
+    hinted = any(any, hints)
+    diagnostics["dense_output_recompute_float64_fields"] = get(diagnostics, "dense_output_recompute_float64_fields", false) || hinted
+    diagnostics["dense_output_recompute_float64"] = get(diagnostics, "dense_output_recompute_float64", false) || hinted
+    return diagnostics
+end
+
 function _output_estimate_diagnostics(system)
     factorization = hasproperty(system, :factorization) ? system.factorization : nothing
     store = isnothing(factorization) ? nothing : _output_estimate_store(factorization)

@@ -359,3 +359,62 @@ end
         release_condensed_coupled_system!(reference)
     end
 end
+
+@testset "driver wiring: field estimates per output id, hint OR, unknown and no-CPU-cache cases" begin
+    common = ("BLAB_COUPLED_TRANSDUCER_CONDENSATION" => "1", "BLAB_COUPLED_INTERFACE_FLUX_ELIMINATION" => "1",
+              "BLAB_COUPLED_DENSE_REFINEMENT" => "1", "BLAB_COUPLED_DENSE_FLOAT64" => "0")
+    for solver in ("lu", "gmres")
+        system, solutions, bem = oe_coupled(Float32, 2000.0, common..., "BLAB_COUPLED_DENSE_SPLIT" => "auto",
+                                            "BLAB_COUPLED_DENSE_SOLVER" => solver)
+        try
+            fields = [evaluate_galerkin_field_cpu(OE_FIELD_POINTS, bem, x.bem_pressure, x.bem_neumann,
+                                                  system.wavenumber, system.field_cache) for x in solutions]
+            estimates = OE.field_output_error_estimates(system, OE_FIELD_POINTS, fields, system.field_cache)
+            gmres = system.factorization isa OE.SplitGMRES && isnothing(system.factorization.fallback)
+            diagnostics = withenv("BLAB_OUTPUT_ERROR_HINT" => nothing) do
+                OE.field_output_error_diagnostics!(OE.dense_solver_diagnostics(system), system, "polar", OE_FIELD_POINTS, fields)
+            end
+            reported = diagnostics["dense_output_estimated_relative_error_field"]["polar"]
+            hints = diagnostics["dense_output_recompute_float64_field"]["polar"]
+            @test length(reported) == 2 && all(length(r) == length(OE_FIELD_POINTS) for r in reported)  # excitation → point
+            if gmres
+                @test all(isnothing, reduce(vcat, reported))   # unknown → JSON null
+                @test all(reduce(vcat, hints))
+            else
+                @test all(reported[j] == estimates[:, j] for j in 1:2)
+                @test hints == [[OE.output_recompute_hint(v, 1e-3) for v in estimates[:, j]] for j in 1:2]
+            end
+            @test diagnostics["dense_output_recompute_float64_fields"] == any(any, hints)
+            # the field hint is ORed into the overall flag, never clears a hint of the driver outputs
+            @test diagnostics["dense_output_recompute_float64"] ==
+                  (OE.dense_solver_diagnostics(system)["dense_output_recompute_float64"] || any(any, hints))
+            if !gmres
+                # a threshold below the smallest field estimate raises the field hint and the overall flag
+                tiny = minimum(estimates) / 2
+                hinted = withenv("BLAB_OUTPUT_ERROR_HINT" => string(tiny)) do
+                    OE.field_output_error_diagnostics!(Dict{String,Any}(), system, "polar", OE_FIELD_POINTS, fields)
+                end
+                @test all(reduce(vcat, hinted["dense_output_recompute_float64_field"]["polar"]))
+                @test hinted["dense_output_recompute_float64"] === true
+                # a second output id is kept separately
+                two = Dict{String,Any}()
+                OE.field_output_error_diagnostics!(two, system, "a", OE_FIELD_POINTS, fields)
+                OE.field_output_error_diagnostics!(two, system, "b", OE_FIELD_POINTS[1:3], [f[1:3] for f in fields])
+                @test length(two["dense_output_estimated_relative_error_field"]["b"][1]) == 3
+                @test two["dense_output_estimated_relative_error_field"]["a"][1][1:3] ==
+                      two["dense_output_estimated_relative_error_field"]["b"][1]
+            end
+            # no CPU field cache (Metal): listed as not computed, no hint raised for it
+            metal_like = (factorization=system.factorization, field_cache=nothing, scalar_type=system.scalar_type,
+                          wavenumber=system.wavenumber)
+            skipped = OE.field_output_error_diagnostics!(Dict{String,Any}(), metal_like, "polar", OE_FIELD_POINTS, fields)
+            @test haskey(skipped["dense_output_field_error_not_computed"], "polar")
+            @test !haskey(skipped, "dense_output_recompute_float64")
+            # a new solve of the factorization alone invalidates the bounds: nothing is reported
+            system.factorization \ ones(ComplexF64, size(system.factorization, 1))
+            @test isempty(OE.field_output_error_diagnostics!(Dict{String,Any}(), system, "polar", OE_FIELD_POINTS, fields))
+        finally
+            release_condensed_coupled_system!(system)
+        end
+    end
+end

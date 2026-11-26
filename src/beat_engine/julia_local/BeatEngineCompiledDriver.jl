@@ -3336,6 +3336,9 @@ function solve_request_impl(request; event_mode=false)
                 for index in eachindex(interfaces)
             ]
             field_s = 0.0
+            # step 2 of docs/ROADMAP.md (display only): per-point solver-error estimates of field outputs
+            field_error_diagnostics = Dict{String,Any}()
+            field_error_s = 0.0
             quantities = Dict{String,Any}[]
             rom_options = get(solver_options, "speaker_rom", Dict{String,Any}())
             rom_matrices = if rom_requested
@@ -3564,6 +3567,12 @@ function solve_request_impl(request; event_mode=false)
                             coupled_system.wavenumber, coupled_system.field_cache, bem_backend,
                             field_batch, metal_field_batch; metal_field_points=metal_field_points)
                             for (fields, solution) in zip(fields_by_excitation, solutions)]
+                        if use_condensed_solver
+                            field_error_started = time_ns()
+                            BeatEngineCoupledCondensed.field_output_error_diagnostics!(field_error_diagnostics,
+                                coupled_system, String(output["id"]), points, pressures)
+                            field_error_s += (time_ns() - field_error_started) / 1.0e9
+                        end
                         push!(
                             quantities,
                             quantity_wire(
@@ -3894,6 +3903,15 @@ function solve_request_impl(request; event_mode=false)
             end
             isnothing(rank_experiment) ||
                 (diagnostics["speaker_rom_rank_experiment"] = rank_experiment)
+            if !isempty(field_error_diagnostics)
+                for (key, value) in field_error_diagnostics
+                    key == "dense_output_recompute_float64" && continue
+                    diagnostics[key] = value
+                end
+                diagnostics["dense_output_recompute_float64"] = get(diagnostics, "dense_output_recompute_float64", false) ||
+                    get(field_error_diagnostics, "dense_output_recompute_float64_fields", false)
+                diagnostics["dense_output_field_error_s"] = field_error_s
+            end
             result = Dict(
                 "schema_version" => 2,
                 "freq_hz" => frequency_hz,
