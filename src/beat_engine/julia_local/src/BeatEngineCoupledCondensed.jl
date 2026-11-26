@@ -597,7 +597,9 @@ request; defaults to `weights`), and the stored per-excitation boundary data `pr
 
 with `b_j` the stored per-excitation input bounds, `n` the number of excitations and `u` the unit
 roundoff of the scalar type (the last term bounds the complex products and the running sum of the
-synthesis). A zero used weight contributes no bound term (its products are exactly zero). The
+synthesis). Gradual underflow adds an absolute term: each real product of the synthesis can be off by
+up to half the smallest subnormal `η` of the scalar type, so every nonzero product `ŵ_j x̂_j` adds
+`2η(1 + γ_{n+2})` per component (`√2 η` for the two real products of each part, rounded up). A zero used weight contributes no bound term (its products are exactly zero). The
 result is propagated to the field and divided by `|field_value|` as in the per-excitation case;
 `NaN` = unknown, `Inf` = zero field value with a nonzero bound (e.g. exact cancellation of the
 weighted excitations). Not included, as there: field-sum rounding and the Float32 assembly error.
@@ -618,30 +620,41 @@ function synthesized_field_output_error_estimates(system, eval_points, field_val
     end
     T = system.scalar_type
     u = Float64(eps(T)) / 2
-    pressure_bound = zeros(Float64, size(bounds.pressure, 1)); neumann_bound = zeros(Float64, size(bounds.neumann, 1))
-    pressure_magnitude = zeros(Float64, length(pressure_bound)); neumann_magnitude = zeros(Float64, length(neumann_bound))
-    for j in 1:excitations
-        w = ComplexF64(weights[j]); deviation = abs(ComplexF64(requested[j]) - w)
-        p = abs.(ComplexF64.(synthesis.pressure[j])); q = abs.(ComplexF64.(synthesis.neumann[j]))
-        (length(p) == length(pressure_bound) && length(q) == length(neumann_bound)) ||
-            throw(ArgumentError("synthesis boundary data of excitation $j do not match the stored bounds"))
-        bp = view(bounds.pressure, :, j); bq = view(bounds.neumann, :, j)
-        if !iszero(w)
-            pressure_bound .+= abs(w) .* bp; neumann_bound .+= abs(w) .* bq
-            pressure_magnitude .+= abs(w) .* p; neumann_magnitude .+= abs(w) .* q
-        end
-        if !iszero(deviation)
-            pressure_bound .+= deviation .* (p .+ bp); neumann_bound .+= deviation .* (q .+ bq)
-        end
-    end
-    m = excitations + 2
-    gamma = sqrt(2.0) * (m * u / (1 - m * u))
-    pressure_bound .+= gamma .* pressure_magnitude; neumann_bound .+= gamma .* neumann_magnitude
+    pressure_bound = _synthesized_boundary_bound(T, weights, requested, synthesis.pressure, bounds.pressure, "pressure")
+    neumann_bound = _synthesized_boundary_bound(T, weights, requested, synthesis.neumann, bounds.neumann, "neumann")
     absolute = galerkin_field_error_bound_cpu(eval_points, pressure_bound, neumann_bound, system.wavenumber, cache)
     rounding = T === Float64 ? 0.0 : sqrt(2.0) * u
     estimates = fill(NaN, length(eval_points), 1)
     _relative_field_estimates!(view(estimates, :, 1), absolute, field_value, rounding, "field_value")
     return estimates
+end
+
+# Componentwise bound of |Σ_j ŵ_j x̂_j (synthesized in Complex{T}) − Σ_j w_j x_j| for one boundary field, see
+# `synthesized_field_output_error_estimates`. `stored` are the per-excitation boundary vectors x̂_j,
+# `input_bounds` the matrix (component × excitation) of their stored bounds b_j.
+function _synthesized_boundary_bound(::Type{T}, weights, requested, stored, input_bounds, name) where {T}
+    excitations = size(input_bounds, 2)
+    u = Float64(eps(T)) / 2
+    m = excitations + 2
+    gamma = sqrt(2.0) * (m * u / (1 - m * u))
+    # gradual underflow of a nonzero complex product: two real products per part, each off by ≤ η/2
+    underflow = 2 * Float64(nextfloat(zero(T))) * (1 + gamma)
+    bound = zeros(Float64, size(input_bounds, 1)); magnitude = zeros(Float64, length(bound))
+    for j in 1:excitations
+        w = ComplexF64(weights[j]); deviation = abs(ComplexF64(requested[j]) - w)
+        x = abs.(ComplexF64.(stored[j]))
+        length(x) == length(bound) ||
+            throw(ArgumentError("synthesis $name data of excitation $j do not match the stored bounds"))
+        b = view(input_bounds, :, j)
+        if !iszero(w)
+            bound .+= abs(w) .* b
+            magnitude .+= abs(w) .* x
+            bound .+= underflow .* .!iszero.(x)
+        end
+        iszero(deviation) || (bound .+= deviation .* (x .+ b))
+    end
+    bound .+= gamma .* magnitude
+    return bound
 end
 
 """

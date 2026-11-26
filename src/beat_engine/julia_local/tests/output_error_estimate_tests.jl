@@ -556,3 +556,41 @@ end
     @test occursin("requested_weights=ComplexF64[", branch)
     @test occursin("synthesis=error_estimate_synthesis", branch)
 end
+
+@testset "REVIEW-22-b0c218b N1: gradual underflow of the weighted synthesis products is bounded" begin
+    # the synthesized boundary bound against an exact BigFloat synthesis with the requested weights,
+    # exact inputs (stored bounds 0), so only the Complex{T} synthesis rounding remains
+    function check(::Type{T}, requested, stored) where {T}
+        weights = Complex{T}.(requested)
+        synthesized = zeros(Complex{T}, length(stored[1]))
+        for (w, x) in zip(weights, stored)
+            synthesized .+= w .* x
+        end
+        exact = setprecision(BigFloat, 256) do
+            [Float64(abs(sum(Complex{BigFloat}(requested[j]) * Complex{BigFloat}(stored[j][i]) for j in eachindex(stored))
+                         - Complex{BigFloat}(synthesized[i]))) for i in eachindex(synthesized)]
+        end
+        bound = OE._synthesized_boundary_bound(T, weights, requested, stored,
+                                               zeros(Float64, length(synthesized), length(stored)), "pressure")
+        return exact, bound
+    end
+    # the reviewer's case: 1e-25 · 1e-20 underflows to the smallest Float32 subnormal (relative error 0.40)
+    exact, bound = check(Float32, [Float64(1f-20)], [ComplexF32[1e-25]])
+    @test exact[1] ≈ 4.012984765e-46 rtol = 1e-6
+    @test all(exact .<= bound)
+    @test bound[1] >= 2 * Float64(nextfloat(0.0f0))
+    # several excitations, complex weights, parts landing in and near the subnormal range
+    rng = MersenneTwister(2213)
+    for T in (Float32, Float64), trial in 1:200
+        n = rand(rng, 1:4); points = 8
+        tiny = Float64(floatmin(T))
+        requested = [ComplexF64(randn(rng), randn(rng)) * exp10(rand(rng, -12:0)) for _ in 1:n]
+        stored = [Complex{T}.(ComplexF64.(randn(rng, points), randn(rng, points)) .* tiny .* exp10.(rand(rng, -4:12, points)))
+                  for _ in 1:n]
+        exact, bound = check(T, requested, stored)
+        @test all(exact .<= bound)
+    end
+    # a zero weight or a zero stored value adds no underflow term
+    _, bound = check(Float32, ComplexF64[0, 1], [ComplexF32[1e-30, 0], ComplexF32[0, 0]])
+    @test all(iszero, bound)
+end
