@@ -21,22 +21,22 @@
     22
   ],
   "lease": {
-    "holder": "work26-19-mwxv0ieb",
-    "acquired_at": "2026-11-26T18:02:00.611Z",
-    "expires_at": "2026-11-26T19:32:00.611Z",
+    "holder": null,
+    "acquired_at": null,
+    "expires_at": null,
     "fencing_token": 32
   },
   "last_completed_run": {
-    "id": "work26-18-mwxszce7",
-    "started_at": "2026-11-26T17:05:06.943Z",
-    "completed_at": "2026-11-26T17:13:51.166Z",
-    "status": "field_reference_projection_underbound_reported",
+    "id": "work26-19-mwxv0ieb",
+    "started_at": "2026-11-26T18:02:00.611Z",
+    "completed_at": "2026-11-26T18:09:30.320Z",
+    "status": "field_projection_fix_verified",
     "source_commit": "b34abee291207a13876068c99948d8ca386756fa",
     "checked_heads": {
       "9": "3d639cef853f6c60caa36fda4a8b39f28baec3f7",
       "14": "b2b756da7076cab3b32a63c822ec91af36a7e6ce",
       "19": "7afbaf4b3d88b1f15e39c12ab9a2a47473b336c9",
-      "22": "2fd01ac56633b524c039d3a7ec67dfdefb05b6d5",
+      "22": "caa6b59b1e8d625a2cfb46e7c32defe625f092d7",
       "23": "dd351b9e7b7ef704c1d228b675b7a89719b6a7d5"
     },
     "source_changes": false,
@@ -44,21 +44,21 @@
     "actions": [
       {
         "pr": 22,
-        "commit": "2fd01ac56633b524c039d3a7ec67dfdefb05b6d5",
-        "review_id": 6078157828,
-        "url": "https://github.com/ttakoprivate/BEAT_Engine/pull/22#pullrequestreview-6078157828",
-        "review_state": "REQUEST_CHANGES"
+        "commit": "caa6b59b1e8d625a2cfb46e7c32defe625f092d7",
+        "review_id": 6078795219,
+        "url": "https://github.com/ttakoprivate/BEAT_Engine/pull/22#pullrequestreview-6078795219",
+        "review_state": "COMMENT"
       }
     ],
-    "evidence": "Fresh cloneT1705, own newly SHA256 verified Julia1.12.6 and new depot; instantiate exit0. Full unchanged output_error_estimate_tests 908/908 (20 testsets), own 28 reference-counterexample/control +6 actual scalar field/estimate assertions, actual driver branch24; all final exit0, no skips/Broken. 966 total; counterexample assertions reproduce undercoverage. P2 near-tangent dot rounding missing absolute error: reference scales already-cancelled projection. F32 s1 q0 true relative1/abs3.8150812e-17Pa estimate8.4293697e-8. F64 s1e-8 q1.2e-6Pa/m true relative.001089154434/abs.006011370423Pa estimate.000984081829, below1e-3. Same stored cache/data; 256bit BigFloat independently evaluates representation. Minimal state zero input bounds, real CPU field and real estimator. Driver single/synthesis/static/sweep uses same boundary arrays, separates timing; nocondensed no diag. Initial own probes exit1 for unfinished deps, unqualified type and incorrect predicted rounded scalar values; corrected own harness, final all pass. No source/baseline edits; no fullrequest/referencegate/Python/physical independently assembled dense/GPU/h343/performance qualification.",
+    "evidence": "Fresh cloneT1802; official new Julia1.12.6 verified official SHA256; new depot, instantiate exit0. Full unchanged output_error_estimate_tests 957/957 in21 sets incl49new, no skips/Broken. Combined harness exit1 after all957 repository passed plus153own/1own assertionfailure: erroneous bit-equality of internal diagnostic reference vs parent. Replaced own assertion with equality of actual scalar field, no source edits. Final own control-only harness exit0 154/154: 144 direct unrounded256bit BigFloat coverage/input-propagation assertions over48 cases(T32/64,s1e-8/1/1e8,0/6kHz,q0/complexq,bothphasors,normalflip)+10actual original estimates/parent undercoverage. Total1111distinct passed, repo not rerun unnecessarily. F32s1 q0 trueRel1 abs3.8150812e-17Pa; newabsbound1.22082599e-15Pa, estimateInf vsparent0. F64s1e-8q1.2e-6 trueRel.001089154434 abs.006011370423Pa unchanged; oldbound.005425527476,newbound.192363853546Pa/newestimate.0348909435263 >1e-3. Actual scalar field unchanged; internal F64 diagnostic rounding differs. Clean source, no baseline changes. No E2Edriver/referencegate/Python/independently assembled physical dense/GPU/h343/performance qualification.",
     "pending": [
       "PR23 N1 zero-scale metric edge resolved and independently verified atdd351b9;other H solver/runtime/hardware qualifications open.",
-      "PR22 new 2fd01ac Float64 field reference rounding reviewed: P2 tangent projection cancellation underbounds, REQUEST_CHANGES6078157828. 908 repo +34 own reference/complete-estimate +24 driver=966 assertions. Prior timing/synthesis-underflow fixes remain verified; norm/mass-solve/assembly/hardware limits remain.",
+      "PR22 caa6b59 projection-rounding P2 fixed and independently verified6078795219: 957 repo assertions +154 own final controls; original cases covered, both estimates >1e-3. Prior timing/synthesis-underflow fixes stay verified. Norm/mass-solve/assembly/hardware limits remain; no overall approval.",
       "PR14 N1/N2b2b756d awaits independent follow-up;row-quadrature/adjoint review and h343 qualification open.",
       "PR19 numerical/export findings and owner split/merge decision open;three ROM fixes verified.",
       "Issue12 VACS sample/format answers pending;PR17 merged;PR9 roadmap update planned."
     ],
-    "continuation": "Continue new or independently actionable work only. Do not repeat unchanged findings, acknowledgments, owner questions. External review/data/hardware waits do not pause routine."
+    "continuation": "Continue new or independently actionable work only. Do not repeat unchanged findings, acknowledgments, owner questions. Normal external review/data/hardware waits do not pause routine."
   },
   "note": "Coordination state only. Read project code from the assigned source branch. Acquire and update this lease through expected-SHA branch updates; do not merge this branch."
 }
