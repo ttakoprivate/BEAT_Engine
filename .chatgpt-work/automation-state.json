@@ -21,42 +21,42 @@
     22
   ],
   "lease": {
-    "holder": "work27-19-mwzaejtv",
-    "acquired_at": "2026-11-27T18:00:36.067Z",
-    "expires_at": "2026-11-27T19:46:28.301Z",
+    "holder": null,
+    "acquired_at": null,
+    "expires_at": null,
     "fencing_token": 34
   },
   "last_completed_run": {
-    "id": "work27-18-mwz8c85w",
-    "started_at": "2026-11-27T17:02:48.404Z",
-    "completed_at": "2026-11-27T17:10:38.304Z",
-    "status": "external_solver_null_hook_reproduced",
+    "id": "work27-19-mwzaejtv",
+    "started_at": "2026-11-27T18:00:36.067Z",
+    "completed_at": "2026-11-27T18:18:24.159Z",
+    "status": "external_solver_fixes_verified",
     "source_commit": "b34abee291207a13876068c99948d8ca386756fa",
     "checked_heads": {
       "9": "3d639cef853f6c60caa36fda4a8b39f28baec3f7",
       "14": "b2b756da7076cab3b32a63c822ec91af36a7e6ce",
       "19": "7afbaf4b3d88b1f15e39c12ab9a2a47473b336c9",
       "22": "caa6b59b1e8d625a2cfb46e7c32defe625f092d7",
-      "23": "f42c6202c9c62fa8a937c2fdbbb319f2052d1dc5"
+      "23": "a6967725cb95f270c494611c0342019e2dad4d91"
     },
     "source_changes": false,
     "tests_rerun": true,
     "actions": [
       {
         "pr": 23,
-        "commit": "f42c6202c9c62fa8a937c2fdbbb319f2052d1dc5",
-        "review_id": 6091393130,
-        "url": "https://github.com/ttakoprivate/BEAT_Engine/pull/23#pullrequestreview-6091393130",
-        "review_state": "REQUEST_CHANGES"
+        "commit": "a6967725cb95f270c494611c0342019e2dad4d91",
+        "review_id": 6092007765,
+        "url": "https://github.com/ttakoprivate/BEAT_Engine/pull/23#pullrequestreview-6092007765",
+        "review_state": "COMMENT"
       }
     ],
-    "evidence": "Fresh clone T1703; new official Julia1.12.6 SHA256 verified/new depot instantiate exit0. Final review_2718.jl --threads=1 --startup-file=no --project=src/beat_engine/julia_local exit0:41 repo driver tests+8 own selection+14 null-hook reproduction=63. Separate diagnostics_2718.jl actual new AST functions with controlled fake numerical hook exit0 44 controls; total107distinct pass0skip/Broken. Actual JSON event path 500/1000Hz null factory bem_solver=nothing accepted, dense outputs bit-identical all4 quantities but tagged review_null. Normal dense test hook maxpointwisecomplexrel peroutput:pressure1.2016024e-14/7.1796522e-15Pa,velocity5.6933074e-16/9.2154243e-16m/s,current8.1692306e-17/1.4449699e-16A,interfacevel7.099866e-15/6.0799877e-15m/s;noexactrefzeros. Reference same dense engine, not independently assembled physical reference. Initial premature harness exit1 JSON not yet installed, initial ASTcontrols43pass1ownPairs fieldaccesserror; final corrected own indexing44pass. No source/baseline changes/no fullreferencegate/realHcompression/Python/GPU/h343/performance. New automated review6091369294 read, four findings not independently verified/repeated.",
+    "evidence": "Fresh clone T1801/new official Julia1.12.6 SHA256 verified/new depot +separate optionalH packages instantiate/add exit0. OPENBLAS_NUM_THREADS1, Julia --threads1 --startup-file=no --project=src/beat_engine/julia_local: review_2719.jl exit0 67(59repo+8own null-hook/positive controls); hmatrix_dev/tests/hmat_driver_switch_test.jl exit0 75(9+47+17+2); persistent_2719.jl exit0 36own, total178distinct passed0skip/Broken. Null factory now rejected selection+realJSON path. Actual source coupled_solver.jl H loader tested single-request process and --worker two requests/4results/7all-validJSON events/2completed, oneGMRESstat/frequency no accumulation,maxiter250, correctexternal solverlabel/dense_solvernothing. ForcedACA error A builder restores BLAS2threads; Cfinally source reviewed only. Pointwisecomplexrelative HvsdenseFloat64 output errors500/1000:pressure1.5827233e-15/4.3859107e-15,velocity2.6578538e-16/5.6641343e-16,current2.6192546e-16/1.6155255e-16,interfacevelocity9.7160965e-16/2.8213601e-15;1exc,noexactrefzeros. Tiny allnearHstorageA/C1; dense reference sameengine notindependentphysical. hwlocsysfswarning butexit0. Clean source/no baselines. No bundle/Cfaultinjection/largercompression/fullreferencegate/Python/GPU/h343/performance/overallqualification.",
     "pending": [
       "PR22 caa6b59 projection-rounding P2 fixed and independently verified6078795219: 957 repo assertions +154 own final controls; original cases covered, both estimates >1e-3. Prior timing/synthesis-underflow fixes stay verified. Norm/mass-solve/assembly/hardware limits remain; no overall approval.",
       "PR14 N1/N2b2b756d awaits independent follow-up;row-quadrature/adjoint review and h343 qualification open.",
       "PR19 numerical/export findings and owner split/merge decision open;three ROM fixes verified.",
       "Issue12 VACS sample/format answers pending;PR17 merged;PR9 roadmap update planned.",
-      "PR23 f42c620 P2 null-hook factory allows mislabeled dense fallback; review6091393130. New automated worker-loading/linear_solver/BLASrestore/maxiter findings await author/follow-up. N1 zero-scale prior fix remains verified; full H/hardware qualifications open."
+      "PR23 a696772 own null-hook P2 verified fixed6092007765. Source-worker auto-loading, external labels, maxiter250, per-frequency reset and A-BLASfailure verified 178tests. Cfinally source-only; bundle/largerH/referencegate/GPU/h343 qualifications remain. No overallapproval."
     ],
     "continuation": "Continue new or independently actionable work only. Do not repeat unchanged findings, acknowledgments, owner questions. Normal external review/data/hardware waits do not pause routine."
   },
