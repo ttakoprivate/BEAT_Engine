@@ -1860,5 +1860,6 @@ include(joinpath(@__DIR__, "interface_velocity_tests.jl"))
 
 include(joinpath(@__DIR__, "thermoviscous_tests.jl"))
 include(joinpath(@__DIR__, "thermoviscous_driver_tests.jl"))
+include(joinpath(@__DIR__, "output_error_estimate_driver_tests.jl"))
 # Required standalone thin-air qualification: exterior_coupled_agreement_tests.jl.
 # Its runtime exceeds the default-suite budget; see docs/ExteriorCoupledQualification.md.
