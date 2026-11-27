@@ -23,7 +23,7 @@
   "lease": {
     "holder": "work27-19-mwzaejtv",
     "acquired_at": "2026-11-27T18:00:36.067Z",
-    "expires_at": "2026-11-27T19:30:36.067Z",
+    "expires_at": "2026-11-27T19:46:28.301Z",
     "fencing_token": 34
   },
   "last_completed_run": {
