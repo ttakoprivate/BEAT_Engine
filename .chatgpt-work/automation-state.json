@@ -21,42 +21,42 @@
     22
   ],
   "lease": {
-    "holder": "work27-18-mwz8c85w",
-    "acquired_at": "2026-11-27T17:02:48.404Z",
-    "expires_at": "2026-11-27T18:32:48.404Z",
+    "holder": null,
+    "acquired_at": null,
+    "expires_at": null,
     "fencing_token": 33
   },
   "last_completed_run": {
-    "id": "work26-19-mwxv0ieb",
-    "started_at": "2026-11-26T18:02:00.611Z",
-    "completed_at": "2026-11-26T18:09:30.320Z",
-    "status": "field_projection_fix_verified",
+    "id": "work27-18-mwz8c85w",
+    "started_at": "2026-11-27T17:02:48.404Z",
+    "completed_at": "2026-11-27T17:10:38.304Z",
+    "status": "external_solver_null_hook_reproduced",
     "source_commit": "b34abee291207a13876068c99948d8ca386756fa",
     "checked_heads": {
       "9": "3d639cef853f6c60caa36fda4a8b39f28baec3f7",
       "14": "b2b756da7076cab3b32a63c822ec91af36a7e6ce",
       "19": "7afbaf4b3d88b1f15e39c12ab9a2a47473b336c9",
       "22": "caa6b59b1e8d625a2cfb46e7c32defe625f092d7",
-      "23": "dd351b9e7b7ef704c1d228b675b7a89719b6a7d5"
+      "23": "f42c6202c9c62fa8a937c2fdbbb319f2052d1dc5"
     },
     "source_changes": false,
     "tests_rerun": true,
     "actions": [
       {
-        "pr": 22,
-        "commit": "caa6b59b1e8d625a2cfb46e7c32defe625f092d7",
-        "review_id": 6078795219,
-        "url": "https://github.com/ttakoprivate/BEAT_Engine/pull/22#pullrequestreview-6078795219",
-        "review_state": "COMMENT"
+        "pr": 23,
+        "commit": "f42c6202c9c62fa8a937c2fdbbb319f2052d1dc5",
+        "review_id": 6091393130,
+        "url": "https://github.com/ttakoprivate/BEAT_Engine/pull/23#pullrequestreview-6091393130",
+        "review_state": "REQUEST_CHANGES"
       }
     ],
-    "evidence": "Fresh cloneT1802; official new Julia1.12.6 verified official SHA256; new depot, instantiate exit0. Full unchanged output_error_estimate_tests 957/957 in21 sets incl49new, no skips/Broken. Combined harness exit1 after all957 repository passed plus153own/1own assertionfailure: erroneous bit-equality of internal diagnostic reference vs parent. Replaced own assertion with equality of actual scalar field, no source edits. Final own control-only harness exit0 154/154: 144 direct unrounded256bit BigFloat coverage/input-propagation assertions over48 cases(T32/64,s1e-8/1/1e8,0/6kHz,q0/complexq,bothphasors,normalflip)+10actual original estimates/parent undercoverage. Total1111distinct passed, repo not rerun unnecessarily. F32s1 q0 trueRel1 abs3.8150812e-17Pa; newabsbound1.22082599e-15Pa, estimateInf vsparent0. F64s1e-8q1.2e-6 trueRel.001089154434 abs.006011370423Pa unchanged; oldbound.005425527476,newbound.192363853546Pa/newestimate.0348909435263 >1e-3. Actual scalar field unchanged; internal F64 diagnostic rounding differs. Clean source, no baseline changes. No E2Edriver/referencegate/Python/independently assembled physical dense/GPU/h343/performance qualification.",
+    "evidence": "Fresh clone T1703; new official Julia1.12.6 SHA256 verified/new depot instantiate exit0. Final review_2718.jl --threads=1 --startup-file=no --project=src/beat_engine/julia_local exit0:41 repo driver tests+8 own selection+14 null-hook reproduction=63. Separate diagnostics_2718.jl actual new AST functions with controlled fake numerical hook exit0 44 controls; total107distinct pass0skip/Broken. Actual JSON event path 500/1000Hz null factory bem_solver=nothing accepted, dense outputs bit-identical all4 quantities but tagged review_null. Normal dense test hook maxpointwisecomplexrel peroutput:pressure1.2016024e-14/7.1796522e-15Pa,velocity5.6933074e-16/9.2154243e-16m/s,current8.1692306e-17/1.4449699e-16A,interfacevel7.099866e-15/6.0799877e-15m/s;noexactrefzeros. Reference same dense engine, not independently assembled physical reference. Initial premature harness exit1 JSON not yet installed, initial ASTcontrols43pass1ownPairs fieldaccesserror; final corrected own indexing44pass. No source/baseline changes/no fullreferencegate/realHcompression/Python/GPU/h343/performance. New automated review6091369294 read, four findings not independently verified/repeated.",
     "pending": [
-      "PR23 N1 zero-scale metric edge resolved and independently verified atdd351b9;other H solver/runtime/hardware qualifications open.",
       "PR22 caa6b59 projection-rounding P2 fixed and independently verified6078795219: 957 repo assertions +154 own final controls; original cases covered, both estimates >1e-3. Prior timing/synthesis-underflow fixes stay verified. Norm/mass-solve/assembly/hardware limits remain; no overall approval.",
       "PR14 N1/N2b2b756d awaits independent follow-up;row-quadrature/adjoint review and h343 qualification open.",
       "PR19 numerical/export findings and owner split/merge decision open;three ROM fixes verified.",
-      "Issue12 VACS sample/format answers pending;PR17 merged;PR9 roadmap update planned."
+      "Issue12 VACS sample/format answers pending;PR17 merged;PR9 roadmap update planned.",
+      "PR23 f42c620 P2 null-hook factory allows mislabeled dense fallback; review6091393130. New automated worker-loading/linear_solver/BLASrestore/maxiter findings await author/follow-up. N1 zero-scale prior fix remains verified; full H/hardware qualifications open."
     ],
     "continuation": "Continue new or independently actionable work only. Do not repeat unchanged findings, acknowledgments, owner questions. Normal external review/data/hardware waits do not pause routine."
   },
