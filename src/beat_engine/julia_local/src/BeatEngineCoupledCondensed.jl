@@ -49,7 +49,10 @@ export assemble_condensed_regular_operators,
     solve_condensed_coupled_system,
     solve_condensed_coupled_systems,
     assemble_condensed_bem_operators,
-    release_condensed_bem_operators!
+    release_condensed_bem_operators!,
+    register_external_bem_solver!,
+    unregister_external_bem_solver!,
+    external_bem_solver_from_env
 
 """
     _interior_partition(fem_system, interface_operators, retained_vertices)
@@ -2071,6 +2074,58 @@ end
 
 """Release an `assemble_condensed_bem_operators` result nobody consumed (host arrays only)."""
 release_condensed_bem_operators!(produced, bem_backend::Symbol) = nothing
+
+# External BEM solvers selectable with BLAB_COUPLED_BEM_SOLVER (roadmap step 6). The engine itself
+# carries no external solver and no dependency for one: a solver (e.g. the H-matrix solver in
+# hmatrix_dev/hmat_engine_solver.jl, which needs Krylov/FMM3D) registers a factory here after it is
+# loaded. Without a registration the switch fails loudly instead of silently solving densely.
+const _EXTERNAL_BEM_SOLVERS = Dict{String,Any}()
+
+"""
+    register_external_bem_solver!(name, factory)
+
+Make `BLAB_COUPLED_BEM_SOLVER=name` select an external BEM solver. `factory()` is called once per
+request and returns `(; bem_solver, diagnostics)`: `bem_solver` is the hook of
+`build_condensed_coupled_system(...; bem_solver)`; `diagnostics()` (or `nothing`) returns a
+`Dict{String,Any}` for the frequency just solved, or `nothing`. The names `dense` and the empty
+name are reserved for the default dense path.
+"""
+function register_external_bem_solver!(name::AbstractString, factory)
+    key = lowercase(strip(String(name)))
+    key in ("", "dense") && throw(ArgumentError("The external BEM solver name \"$key\" is reserved for the dense path."))
+    _EXTERNAL_BEM_SOLVERS[key] = factory
+    return nothing
+end
+
+"""Remove a registration made by `register_external_bem_solver!` (tests)."""
+unregister_external_bem_solver!(name::AbstractString) =
+    (delete!(_EXTERNAL_BEM_SOLVERS, lowercase(strip(String(name)))); nothing)
+
+"""
+    external_bem_solver_from_env(; condensed, env=ENV)
+
+Read BLAB_COUPLED_BEM_SOLVER. Unset, empty or `dense` returns `nothing` (the dense path, unchanged).
+Any other value must name a registered solver and needs the condensed coupled solver (`condensed`);
+it returns `(; name, bem_solver, diagnostics)` from that solver's factory. Errors instead of falling
+back to the dense path, so a requested H-matrix run never reports dense results under its name.
+"""
+function external_bem_solver_from_env(; condensed::Bool, env=ENV)
+    name = lowercase(strip(String(get(env, "BLAB_COUPLED_BEM_SOLVER", "dense"))))
+    name in ("", "dense") && return nothing
+    factory = get(_EXTERNAL_BEM_SOLVERS, name, nothing)
+    if isnothing(factory)
+        known = isempty(_EXTERNAL_BEM_SOLVERS) ? "none" : join(sort!(collect(keys(_EXTERNAL_BEM_SOLVERS))), ", ")
+        error("BLAB_COUPLED_BEM_SOLVER=$name: no external BEM solver of that name is loaded (registered: $known). " *
+              "The H-matrix solver lives in hmatrix_dev/hmat_engine_solver.jl and registers itself as \"hmatrix\" " *
+              "once it is loaded with its packages; use \"dense\" for the default path.")
+    end
+    condensed || error("BLAB_COUPLED_BEM_SOLVER=$name needs the condensed coupled solver " *
+                       "(static condensation on the CPU or Metal backend).")
+    made = factory()
+    hasproperty(made, :bem_solver) || error("The factory of external BEM solver \"$name\" must return (; bem_solver, diagnostics).")
+    diagnostics = hasproperty(made, :diagnostics) ? made.diagnostics : nothing
+    return (; name, bem_solver=made.bem_solver, diagnostics)
+end
 
 """
     build_condensed_coupled_system(fem_mesh, bem_mesh, interface_map, frequency_hz, sound_speed, density; ...)

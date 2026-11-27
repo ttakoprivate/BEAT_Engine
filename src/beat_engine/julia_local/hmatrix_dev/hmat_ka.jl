@@ -316,7 +316,7 @@ function hbuild_gpu(o, g::KAGeom, todev, root::HCluster, adm, tol::Float64, n::I
         lr[t] = LowRank(s.I, s.J, U, V)
     end
     LinearAlgebra.BLAS.set_num_threads(nb)
-    @printf("   admissible blocks needing exact near fixup: %d of %d\n", nnear, length(states))
-    @printf("   gpu build: near exact %.1fs, dense %.1fs, ACA %.1fs (%d rounds, device %.1fs), recompress %.1fs\n", tn, td, ta, rounds, tdev, tr)
+    @printf(stderr, "   admissible blocks needing exact near fixup: %d of %d\n", nnear, length(states))
+    @printf(stderr, "   gpu build: near exact %.1fs, dense %.1fs, ACA %.1fs (%d rounds, device %.1fs), recompress %.1fs\n", tn, td, ta, rounds, tdev, tr)
     return HMat{ComplexF64}(n, n, lr, dn), td + tn, ta + tr
 end

@@ -3071,6 +3071,11 @@ function solve_request_impl(request; event_mode=false)
     # BeatEngineCoupled. Metal has no GPU LU, so it uses the CPU condensed solver with its
     # BEM operators assembled on the GPU.
     use_condensed_solver = static_condensation && bem_backend in (:cpu, :metal)
+    # BLAB_COUPLED_BEM_SOLVER (roadmap step 6): unset or `dense` keeps the dense BEM path unchanged.
+    # Another name selects a registered external BEM solver (e.g. `hmatrix` once
+    # hmatrix_dev/hmat_engine_solver.jl is loaded) that replaces the dense BEM assembly; unknown
+    # names and non-condensed solves are errors, never a silent dense fallback.
+    external_bem = BeatEngineCoupledCondensed.external_bem_solver_from_env(; condensed=use_condensed_solver)
     quadrature_selections = if use_condensed_solver || bem_backend == :rocm
         mode = lowercase(String(get(solver_options, "regular_quadrature_mode", "fixed")))
         mode in ("fixed", "wavelength") || error(
@@ -3175,7 +3180,9 @@ function solve_request_impl(request; event_mode=false)
         length(bem_mesh.vertices) + length(bem_mesh.faces) + length(interface_map.fem_vertex_indices)
     )
     metal_field_points = nothing
-    pipeline_candidate = use_condensed_solver && coupled_cache !== nothing && length(pipeline_frequencies) > 1
+    # The sweep pipeline prefetches dense BEM operators, which an external BEM solver never forms.
+    pipeline_candidate = use_condensed_solver && isnothing(external_bem) && coupled_cache !== nothing &&
+                         length(pipeline_frequencies) > 1
     try
         if metal_field_batch !== nothing
             metal_field_points = BeatEngineCore.prepare_metal_field_output_points(metal_field_batch.point_sets)
@@ -3234,6 +3241,7 @@ function solve_request_impl(request; event_mode=false)
                         isnothing(get(solver_options, "speaker_rom_rank_experiment", nothing)),
                     bem_operators=sweep_pipeline === nothing ? nothing :
                                   () -> take_sweep_assembly!(sweep_pipeline, frequency_index - sweep_pipeline_start + 1),
+                    bem_solver=isnothing(external_bem) ? nothing : external_bem.bem_solver,
                 )
             else
                 build_coupled_system(
@@ -3891,6 +3899,12 @@ function solve_request_impl(request; event_mode=false)
                     sweep_pipeline_plan === nothing ? nothing : String(sweep_pipeline_plan.reason)
                 diagnostics["coupled_sweep_pipeline_saving_model_s"] =
                     sweep_pipeline_plan === nothing ? nothing : sweep_pipeline_plan.saving_model_s
+            end
+            # Only with an external BEM solver, so the dense path's diagnostics stay as they were.
+            if !isnothing(external_bem)
+                diagnostics["coupled_bem_solver"] = external_bem.name
+                diagnostics["coupled_bem_solver_diagnostics"] =
+                    isnothing(external_bem.diagnostics) ? nothing : external_bem.diagnostics()
             end
             isnothing(rank_experiment) ||
                 (diagnostics["speaker_rom_rank_experiment"] = rank_experiment)

@@ -171,3 +171,61 @@ function hmatrix_bem_solver(; tol::Float64=1e-6, eta::Float64=1.0, leaf::Int=48,
         (; flux_operator_mul, factorize, exterior_solve)
     end
 end
+
+"""
+    hmatrix_options_from_env(env=ENV)
+
+H-matrix settings for the driver switch `BLAB_COUPLED_BEM_SOLVER=hmatrix`: `BLAB_HMATRIX_TOL` (1e-6),
+`BLAB_HMATRIX_ETA` (1.0), `BLAB_HMATRIX_LEAF` (48), `BLAB_HMATRIX_RTOL` (1e-9), `BLAB_HMATRIX_MAXITER`
+(300). The defaults are the values of the hook tests; they are not a qualified accuracy setting.
+"""
+function hmatrix_options_from_env(env=ENV)
+    read(name, T, default) = begin
+        raw = strip(String(get(env, name, "")))
+        isempty(raw) && return default
+        value = tryparse(T, raw)
+        (isnothing(value) || !(value > 0) || (T === Float64 && !isfinite(value))) &&
+            throw(ArgumentError("$name must be a positive $(T === Int ? "integer" : "finite number"), got \"$raw\"."))
+        value
+    end
+    return (tol=read("BLAB_HMATRIX_TOL", Float64, 1e-6), eta=read("BLAB_HMATRIX_ETA", Float64, 1.0),
+            leaf=read("BLAB_HMATRIX_LEAF", Int, 48), rtol=read("BLAB_HMATRIX_RTOL", Float64, 1e-9),
+            maxiter=read("BLAB_HMATRIX_MAXITER", Int, 300))
+end
+
+"""
+    hmatrix_external_bem_solver(; options...)
+
+Factory result for `register_external_bem_solver!`: `(; bem_solver, diagnostics)`. `diagnostics()`
+reports the frequency solved since its previous call (build seconds and storage ratios of H(A) and
+H(C), GMRES iterations, residuals and seconds per right-hand side, and the same for the exterior
+replay solve) and then forgets it, so every frequency carries only its own values.
+"""
+function hmatrix_external_bem_solver(; options...)
+    solves = HMatCoupledSolve[]
+    exterior = NamedTuple[]
+    hook = hmatrix_bem_solver(; options..., solves=solves, exterior_stats=exterior)
+    diagnostics = () -> begin
+        isempty(solves) && isempty(exterior) && return nothing
+        d = Dict{String,Any}("solver" => "hmatrix")
+        if !isempty(solves)
+            S = solves[end]
+            d["build"] = Dict{String,Any}(String(k) => v for (k, v) in pairs(S.build))
+            d["gmres_iterations"] = [s.iterations for s in S.stats]
+            d["gmres_relative_residuals"] = [s.residual for s in S.stats]
+            d["gmres_solved"] = [s.solved for s in S.stats]
+            d["gmres_s"] = [s.seconds for s in S.stats]
+        end
+        d["exterior_gmres_iterations"] = [s.iterations for s in exterior]
+        d["exterior_gmres_relative_residuals"] = [s.residual for s in exterior]
+        d["exterior_gmres_s"] = [s.seconds for s in exterior]
+        empty!(solves); empty!(exterior)
+        d
+    end
+    return (; bem_solver=hook, diagnostics)
+end
+
+# Loading this file makes `BLAB_COUPLED_BEM_SOLVER=hmatrix` available to the driver; settings are read
+# from the environment once per request (`hmatrix_options_from_env`).
+BeatEngineCoupledCondensed.register_external_bem_solver!("hmatrix",
+    () -> hmatrix_external_bem_solver(; hmatrix_options_from_env()...))

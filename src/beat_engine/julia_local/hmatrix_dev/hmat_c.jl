@@ -103,6 +103,6 @@ function hbuild_c_gpu(o, op, g::KAGeom, todev, rowroot::HCluster, colroot::HClus
         U, V = recompress(U, V, tol); lr[t] = LowRank(s.I, s.J, U, V)
     end
     LinearAlgebra.BLAS.set_num_threads(nb)
-    @printf("   C build: near exact %.1fs, dense %.1fs, ACA %.1fs (%d rounds, device %.1fs), recompress %.1fs\n", tn, td, ta, rounds, tdev, tr)
+    @printf(stderr, "   C build: near exact %.1fs, dense %.1fs, ACA %.1fs (%d rounds, device %.1fs), recompress %.1fs\n", tn, td, ta, rounds, tdev, tr)
     return HMat{ComplexF64}(n, m, lr, dn)
 end
