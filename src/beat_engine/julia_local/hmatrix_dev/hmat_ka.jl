@@ -306,16 +306,22 @@ function hbuild_gpu(o, g::KAGeom, todev, root::HCluster, adm, tol::Float64, n::I
     end
     nnear = count(s -> s.hasnear, states)
     nb = LinearAlgebra.BLAS.get_num_threads(); LinearAlgebra.BLAS.set_num_threads(1)
-    ta = @elapsed (rounds, tdev) = aca_batched(states, (EI, EJ, need) -> _device_entries(g, todev, o, nearEx, EI, EJ, need), tol / 10)
-    lr = Vector{LowRank{ComplexF64}}(undef, length(states))
-    tr = @elapsed Threads.@threads for t in eachindex(states)
-        s = states[t]; k = length(s.U)
-        U = k == 0 ? zeros(ComplexF64, length(s.I), 0) : reduce(hcat, s.U)
-        V = k == 0 ? zeros(ComplexF64, length(s.J), 0) : reduce(hcat, s.V)
-        U, V = recompress(U, V, tol)
-        lr[t] = LowRank(s.I, s.J, U, V)
+    # Restore the process-wide BLAS thread count also when the build throws: the persistent JSON
+    # worker catches request errors and would otherwise run every later request single-threaded.
+    local rounds, tdev, ta, tr, lr
+    try
+        ta = @elapsed (rounds, tdev) = aca_batched(states, (EI, EJ, need) -> _device_entries(g, todev, o, nearEx, EI, EJ, need), tol / 10)
+        lr = Vector{LowRank{ComplexF64}}(undef, length(states))
+        tr = @elapsed Threads.@threads for t in eachindex(states)
+            s = states[t]; k = length(s.U)
+            U = k == 0 ? zeros(ComplexF64, length(s.I), 0) : reduce(hcat, s.U)
+            V = k == 0 ? zeros(ComplexF64, length(s.J), 0) : reduce(hcat, s.V)
+            U, V = recompress(U, V, tol)
+            lr[t] = LowRank(s.I, s.J, U, V)
+        end
+    finally
+        LinearAlgebra.BLAS.set_num_threads(nb)
     end
-    LinearAlgebra.BLAS.set_num_threads(nb)
     @printf(stderr, "   admissible blocks needing exact near fixup: %d of %d\n", nnear, length(states))
     @printf(stderr, "   gpu build: near exact %.1fs, dense %.1fs, ACA %.1fs (%d rounds, device %.1fs), recompress %.1fs\n", tn, td, ta, rounds, tdev, tr)
     return HMat{ComplexF64}(n, n, lr, dn), td + tn, ta + tr

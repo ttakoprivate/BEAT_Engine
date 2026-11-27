@@ -28,6 +28,53 @@ const DEFAULT_TRANSDUCER_REFERENCE_VOLTAGE_V = 2.83
 const RUN_MESH_PROVENANCE = Ref{Any}([])
 const COMPILED_WORKER_LOAD = Ref{Any}(nothing)
 
+# External BEM solvers that live outside src/ and register themselves when their files are loaded
+# (roadmap step 6). Paths are relative to this file's directory, loaded in this order.
+const EXTERNAL_BEM_SOLVER_SOURCES = Dict(
+    "hmatrix" => (joinpath("src", "BeatEngineFmm.jl"), joinpath("hmatrix_dev", "hmat_engine_solver.jl")),
+)
+
+"""
+    load_external_bem_solver_from_env!(; env=ENV, root=@__DIR__) -> Union{Nothing,Module}
+
+Worker start-up for `BLAB_COUPLED_BEM_SOLVER`: when it names a built-in external BEM solver that is not
+registered yet (`hmatrix`), include that solver's files into a fresh module that sees this driver's
+engine modules, so the solver registers itself before the first request. Unset, `dense`, unknown names
+and already registered solvers are left alone (`external_bem_solver_from_env` reports unknown names per
+request). Missing packages (FMM3D, Krylov, LinearMaps, KernelAbstractions, Adapt) are an error, never a
+dense fallback. Call it at top level, before `run_worker`/`solve_request`, so the registered methods are
+visible to the request (world age).
+"""
+function load_external_bem_solver_from_env!(; env=ENV, root::AbstractString=@__DIR__)
+    name = lowercase(strip(String(get(env, "BLAB_COUPLED_BEM_SOLVER", "dense"))))
+    sources = get(EXTERNAL_BEM_SOLVER_SOURCES, name, nothing)
+    (isnothing(sources) || haskey(BeatEngineCoupledCondensed._EXTERNAL_BEM_SOLVERS, name)) && return nothing
+    host = Module(Symbol("BeatEngineExternalBemSolver_", name))
+    # A bare `Module` has no `include`/`eval`; the solver files include their own helpers.
+    Core.eval(host, :(include(path::AbstractString) = Base.include($host, path)))
+    Core.eval(host, :(eval(x) = Core.eval($host, x)))
+    for (binding, value) in ((:BeatEngineCore, BeatEngineCore), (:BeatEngineCoupled, BeatEngineCoupled),
+                             (:BeatEngineCoupledCondensed, BeatEngineCoupledCondensed),
+                             (:BeatEngineInterfaceRadiation, BeatEngineInterfaceRadiation))
+        Core.eval(host, :(const $binding = $value))
+        Core.eval(host, :(using .$binding))
+    end
+    for file in sources
+        path = joinpath(root, file)
+        isfile(path) || error("BLAB_COUPLED_BEM_SOLVER=$name: solver file $path is missing.")
+        try
+            Base.include(host, path)
+        catch exception
+            error("BLAB_COUPLED_BEM_SOLVER=$name: loading $path failed (are FMM3D, Krylov, LinearMaps, " *
+                  "KernelAbstractions and Adapt on JULIA_LOAD_PATH?): " * sprint(showerror, exception))
+        end
+        file == joinpath("src", "BeatEngineFmm.jl") && Core.eval(host, :(using .BeatEngineFmm))
+    end
+    haskey(BeatEngineCoupledCondensed._EXTERNAL_BEM_SOLVERS, name) ||
+        error("BLAB_COUPLED_BEM_SOLVER=$name: loading its files did not register the solver.")
+    return host
+end
+
 function record_result_provenance!(result, request)
     diagnostics = result["diagnostics"]
     diagnostics["phasor_convention"] = phasor_convention()
@@ -3726,7 +3773,13 @@ function solve_request_impl(request; event_mode=false)
                 "interface_transfer_normalized_eigenvalue_floor" =>
                     max(sqrt(eps(Float64)), 1024 * Float64(eps(FloatType))),
                 "linear_solver" => if coupled_system.formulation == :fem_interface_condensed
-                    if coupled_system.linear_backend == :rocm
+                    if !isnothing(external_bem)
+                        # The external BEM solver solves the condensed system, not a dense LU.
+                        schur = coupled_system.condensation.backend == :cpu_noop ? "cpu_noop_schur" :
+                                coupled_system.condensation.backend == :mumps_seq ? "cpu_mumps_seq_schur" :
+                                "cpu_umfpack_schur"
+                        "$(schur)_plus_external_$(external_bem.name)"
+                    elseif coupled_system.linear_backend == :rocm
                         "rocm_hybrid_cpu_sparse_schur_plus_rocsolver_dense_lu"
                     elseif coupled_system.linear_backend == :cuda
                         "cuda_cudss_schur_plus_dense_lu"

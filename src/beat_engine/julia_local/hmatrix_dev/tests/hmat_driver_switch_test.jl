@@ -52,6 +52,7 @@ end
             hd = h["diagnostics"]
             @test hd["coupled_bem_solver"] == "hmatrix"
             @test hd["interface_elimination"] == "none"
+            @test hd["linear_solver"] == "cpu_umfpack_schur_plus_external_hmatrix" && hd["dense_solver"] === nothing
             @test hd["coupled_sweep_pipeline"] == false
             stats = hd["coupled_bem_solver_diagnostics"]
             @test stats["solver"] == "hmatrix"
@@ -85,7 +86,7 @@ end
             build = r["diagnostics"]["coupled_bem_solver_diagnostics"]["build"]
             println("  hmatrix switch leaf 8 $(r["freq_hz"]) Hz: storage A $(build["storage_A"]), storage C $(build["storage_C"]), ",
                     "GMRES iterations $(r["diagnostics"]["coupled_bem_solver_diagnostics"]["gmres_iterations"])")
-            @test build["tol"] == 1e-8 && build["leaf"] == 8 && build["rtol"] == 1e-12
+            @test build["tol"] == 1e-8 && build["leaf"] == 8 && build["rtol"] == 1e-12 && build["maxiter"] == 300
             @test build["storage_A"] == 1.0  # no compression on this mesh, see above
         end
         for (d, t) in zip(dense.results, tight.results), (qd, qt) in zip(d["quantities"], t["quantities"])
@@ -95,5 +96,58 @@ end
             @test rel < 1e-6
         end
     end
+end
+# Codex P1 on f42c620: the real worker entry coupled_solver.jl (source driver, BLAB_BEAT_ENGINE_BUNDLE=0)
+# must load and register the H-matrix solver by itself from BLAB_COUPLED_BEM_SOLVER=hmatrix, with no
+# test-side include. Run as a separate process on the same tiny request and compared with the in-process
+# dense Float64 run.
+@testset "BLAB_COUPLED_BEM_SOLVER=hmatrix through the coupled_solver.jl worker process" begin
+    request = request64()
+    withenv(coupled_workload_environment(; mumps=false, defaults=:cpu)...) do
+        dense = solve_coupled_workload(request)
+        lines = mktemp() do path, io
+            JSON.print(io, request); close(io)
+            cmd = `$(Base.julia_cmd()) --startup-file=no --project=$(JL_ROOT) $(joinpath(JL_ROOT, "coupled_solver.jl"))`
+            env = copy(ENV)
+            env["BLAB_COUPLED_BEM_SOLVER"] = "hmatrix"; env["BLAB_BEAT_ENGINE_BUNDLE"] = "0"
+            env["BLAB_HMATRIX_MAXITER"] = "250"
+            readlines(pipeline(setenv(cmd, env); stdin=path))
+        end
+        results = [JSON.parse(l) for l in lines if startswith(l, "{") && occursin("\"freq_hz\"", l)]
+        @test length(results) == length(dense.results)
+        for (d, h) in zip(dense.results, results)
+            hd = h["diagnostics"]
+            @test hd["coupled_bem_solver"] == "hmatrix"
+            @test hd["linear_solver"] == "cpu_umfpack_schur_plus_external_hmatrix"
+            @test hd["coupled_bem_solver_diagnostics"]["build"]["maxiter"] == 250
+            @test all(hd["coupled_bem_solver_diagnostics"]["gmres_solved"])
+            for (qd, qh) in zip(d["quantities"], h["quantities"])
+                r = ComplexF64.(decode(qd)); c = ComplexF64.(decode(qh)); nz = .!iszero.(r)
+                rel = maximum(abs.(c[nz] .- r[nz]) ./ abs.(r[nz]); init=0.0)
+                println("  hmatrix worker process $(d["freq_hz"]) Hz $(qd["id"]) ($(qd["unit"])): max complex relative ",
+                        "error vs dense Float64 $(rel), entries $(count(nz)), exact zeros $(count(!, nz))")
+                @test rel < SWITCH_BOUND
+            end
+        end
+    end
+end
+# Codex P2 on f42c620: a failing H-matrix build must not leave the process-wide BLAS thread count at 1
+# (the persistent worker catches the error and keeps serving requests). The batched ACA is replaced by
+# one that throws inside the single-threaded region; this test runs last because it redefines it.
+@testset "BLAS thread count restored after a failing H-matrix build" begin
+    threads = max(2, LinearAlgebra.BLAS.get_num_threads())
+    LinearAlgebra.BLAS.set_num_threads(threads)
+    Core.eval(@__MODULE__, :(aca_batched(states::Vector{ACAState}, entries, tol::Float64) = error("forced ACA failure")))
+    request = request64()
+    failure = withenv(coupled_workload_environment(; mumps=false, defaults=:cpu)...,
+                      "BLAB_COUPLED_BEM_SOLVER" => "hmatrix") do
+        try
+            solve_request(request); ""
+        catch err
+            sprint(showerror, err)
+        end
+    end
+    @test occursin("forced ACA failure", failure)
+    @test LinearAlgebra.BLAS.get_num_threads() == threads
 end
 end

@@ -136,7 +136,7 @@ function hmatrix_bem_solver(; tol::Float64=1e-6, eta::Float64=1.0, leaf::Int=48,
             t_P = @elapsed base = FmmCoupledSolve(op, rest, B, Qr, Mr, flux, motion; rtol=rtol, maxiter=maxiter)
             build = (operator_s=t_op, build_A_s=t_A, build_C_s=t_C, preconditioner_s=t_P,
                      storage_A=hstorage(HA) / nB^2, storage_C=hstorage(HC) / (nB * length(cols)),
-                     flux_columns=length(cols), tol=tol, eta=eta, leaf=leaf, rtol=rtol)
+                     flux_columns=length(cols), tol=tol, eta=eta, leaf=leaf, rtol=rtol, maxiter=maxiter)
             S = HMatCoupledSolve(base, HA, HC, colsdof, NamedTuple[], build)
             isnothing(solves) || push!(solves, S)
             S

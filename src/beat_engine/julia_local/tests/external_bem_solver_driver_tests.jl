@@ -72,6 +72,16 @@ end
         CC.register_external_bem_solver!("test_dense", () -> (; diagnostics=nothing))
         @test_throws ErrorException CC.external_bem_solver_from_env(; condensed=true,
             env=Dict("BLAB_COUPLED_BEM_SOLVER" => "test_dense"))
+        # Review REVIEW-23-f42c620 (P2): a factory returning bem_solver=nothing would run the dense path
+        # under the external solver's name; it must be rejected.
+        null_calls = Ref(0)
+        CC.register_external_bem_solver!("test_dense", () -> (null_calls[] += 1; (; bem_solver=nothing, diagnostics=nothing)))
+        null_error = try
+            CC.external_bem_solver_from_env(; condensed=true, env=Dict("BLAB_COUPLED_BEM_SOLVER" => "test_dense")); ""
+        catch err
+            sprint(showerror, err)
+        end
+        @test occursin("bem_solver=nothing", null_error) && null_calls[] == 1
     finally
         CC.unregister_external_bem_solver!("test_dense")
     end
@@ -96,6 +106,11 @@ end
                 @test length(e["diagnostics"]["coupled_bem_solver_diagnostics"]["wavenumbers"]) == 1
                 @test e["diagnostics"]["coupled_sweep_pipeline"] == false
                 @test e["diagnostics"]["interface_elimination"] == "none"
+                # Codex P2 on f42c620: no dense LU is claimed for an external solve.
+                @test e["diagnostics"]["linear_solver"] == "cpu_umfpack_schur_plus_external_test_dense"
+                @test e["diagnostics"]["dense_solver"] === nothing
+                @test d["diagnostics"]["linear_solver"] == "cpu_umfpack_schur_plus_dense_lu"
+                @test d["diagnostics"]["dense_solver"] == "lu_float64"
                 @test [q["id"] for q in d["quantities"]] == [q["id"] for q in e["quantities"]]
                 for (qd, qe) in zip(d["quantities"], e["quantities"])
                     r = ComplexF64.(decode(qd)); c = ComplexF64.(decode(qe))
@@ -118,9 +133,56 @@ end
             @test_throws Exception withenv("BLAB_COUPLED_BEM_SOLVER" => "no_such_solver") do
                 solve_request(request64())
             end
+            # Same review: a null hook fails the request instead of solving densely under its name.
+            CC.register_external_bem_solver!("test_null", () -> (; bem_solver=nothing, diagnostics=nothing))
+            try
+                @test_throws Exception withenv("BLAB_COUPLED_BEM_SOLVER" => "test_null") do
+                    solve_request(request64())
+                end
+            finally
+                CC.unregister_external_bem_solver!("test_null")
+            end
         end
     finally
         CC.unregister_external_bem_solver!("test_dense")
+    end
+end
+
+# Codex P1 on f42c620: the worker (coupled_solver.jl) loads the solver named by BLAB_COUPLED_BEM_SOLVER
+# before the first request. A stand-in solver tree with the same file layout as `hmatrix` checks the
+# loader without FMM3D; the real H-matrix files are loaded by hmatrix_dev/tests/hmat_driver_switch_test.jl.
+@testset "load_external_bem_solver_from_env! (worker start-up)" begin
+    @test load_external_bem_solver_from_env!(; env=Dict{String,String}()) === nothing
+    @test load_external_bem_solver_from_env!(; env=Dict("BLAB_COUPLED_BEM_SOLVER" => "dense")) === nothing
+    @test load_external_bem_solver_from_env!(; env=Dict("BLAB_COUPLED_BEM_SOLVER" => "no_such_solver")) === nothing
+    had_hmatrix = haskey(CC._EXTERNAL_BEM_SOLVERS, "hmatrix")
+    saved = had_hmatrix ? CC._EXTERNAL_BEM_SOLVERS["hmatrix"] : nothing
+    CC.unregister_external_bem_solver!("hmatrix")
+    env = Dict("BLAB_COUPLED_BEM_SOLVER" => " HMatrix ")
+    try
+        mktempdir() do root
+            mkpath(joinpath(root, "src")); mkpath(joinpath(root, "hmatrix_dev"))
+            @test_throws ErrorException load_external_bem_solver_from_env!(; env, root)  # files missing
+            write(joinpath(root, "src", "BeatEngineFmm.jl"),
+                  "module BeatEngineFmm\nusing ..BeatEngineCore\nconst MARK = :fmm\nexport MARK\nend\n")
+            write(joinpath(root, "hmatrix_dev", "hmat_engine_solver.jl"), "const UNREGISTERED = true\n")
+            @test_throws ErrorException load_external_bem_solver_from_env!(; env, root)  # did not register
+            write(joinpath(root, "hmatrix_dev", "hmat_engine_solver.jl"),
+                  "@assert MARK === :fmm && isdefined(@__MODULE__, :ConformingInterfaceMap)\n" *
+                  "include(joinpath(@__DIR__, \"helper.jl\")); @assert HELPER === 1\n" *
+                  "BeatEngineCoupledCondensed.register_external_bem_solver!(\"hmatrix\", " *
+                  "() -> (; bem_solver=identity, diagnostics=nothing))\n")
+            write(joinpath(root, "hmatrix_dev", "helper.jl"), "const HELPER = 1\n")  # solver files include helpers
+            host = load_external_bem_solver_from_env!(; env, root)
+            @test host isa Module && haskey(CC._EXTERNAL_BEM_SOLVERS, "hmatrix")
+            # A request after start-up runs in a newer world; invokelatest stands in for that here.
+            @test Base.invokelatest(CC.external_bem_solver_from_env; condensed=true, env).bem_solver === identity
+            # Already registered: nothing is loaded again.
+            @test load_external_bem_solver_from_env!(; env, root=joinpath(root, "missing")) === nothing
+        end
+    finally
+        CC.unregister_external_bem_solver!("hmatrix")
+        isnothing(saved) || CC.register_external_bem_solver!("hmatrix", saved)
     end
 end
 end

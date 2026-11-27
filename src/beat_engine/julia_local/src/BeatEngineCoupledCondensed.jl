@@ -323,6 +323,16 @@ function dense_solver_diagnostics(system)
 end
 
 function _dense_solver_diagnostics(system)
+    # An external BEM solver (roadmap step 6) owns the factorization; its own diagnostics are reported
+    # under `coupled_bem_solver_diagnostics`, so no dense solver is claimed here.
+    if hasproperty(system, :bem_solver) && system.bem_solver == :external
+        return Dict{String,Any}(
+            "dense_solver" => nothing,
+            "dense_refinement_iterations" => 0,
+            "dense_refinement_fallback_reason" => nothing,
+            "dense_refinement_backward_error" => nothing,
+        )
+    end
     factorization = hasproperty(system, :factorization) ? system.factorization : nothing
     if factorization isa SplitGMRES
         return Dict{String,Any}(
@@ -2123,6 +2133,10 @@ function external_bem_solver_from_env(; condensed::Bool, env=ENV)
                        "(static condensation on the CPU or Metal backend).")
     made = factory()
     hasproperty(made, :bem_solver) || error("The factory of external BEM solver \"$name\" must return (; bem_solver, diagnostics).")
+    # `bem_solver=nothing` would make the builder take the dense branch while the result carries this
+    # solver's name, so a factory without a hook is an error, not a silent dense run.
+    isnothing(made.bem_solver) && error("The factory of external BEM solver \"$name\" returned bem_solver=nothing; " *
+                                        "it must return the hook of build_condensed_coupled_system(...; bem_solver).")
     diagnostics = hasproperty(made, :diagnostics) ? made.diagnostics : nothing
     return (; name, bem_solver=made.bem_solver, diagnostics)
 end
