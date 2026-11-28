@@ -21,41 +21,41 @@
     22
   ],
   "lease": {
-    "holder": "work18-mx0nmtx4-dmdpxn5o",
-    "acquired_at": "2026-11-28T16:58:43.576Z",
-    "expires_at": "2026-11-28T18:28:43.576Z",
+    "holder": null,
+    "acquired_at": null,
+    "expires_at": null,
     "fencing_token": 41
   },
   "last_completed_run": {
-    "id": "work17-mx0ll2up-tv3f0lwk",
-    "started_at": "2026-11-28T16:01:22.609Z",
-    "completed_at": "2026-11-28T16:14:58.007Z",
-    "status": "compression_fixture_active_sphere_reproduced_changes_requested",
+    "id": "work18-mx0nmtx4-dmdpxn5o",
+    "started_at": "2026-11-28T16:58:43.576Z",
+    "completed_at": "2026-11-28T17:10:48.156Z",
+    "status": "passive_sphere_verified_empty_output_regression_requested",
     "source_commit": "b34abee291207a13876068c99948d8ca386756fa",
     "checked_heads": {
       "9": "3d639cef853f6c60caa36fda4a8b39f28baec3f7",
       "14": "b2b756da7076cab3b32a63c822ec91af36a7e6ce",
       "19": "7afbaf4b3d88b1f15e39c12ab9a2a47473b336c9",
       "22": "df4d4a1a3ab20cc65519d6bf976e536edfe2b1f0",
-      "23": "378cba5ec00609e2f63ffb3356fc5e082812d00e"
+      "23": "cf22370aeab13a40dfddbb088337858519433f21"
     },
     "source_changes": false,
     "tests_rerun": true,
     "actions": [
       {
         "pr": 23,
-        "commit": "378cba5ec00609e2f63ffb3356fc5e082812d00e",
-        "review_id": 6098975675,
-        "url": "https://github.com/ttakoprivate/BEAT_Engine/pull/23#pullrequestreview-6098975675",
+        "commit": "cf22370aeab13a40dfddbb088337858519433f21",
+        "review_id": 6099206208,
+        "url": "https://github.com/ttakoprivate/BEAT_Engine/pull/23#pullrequestreview-6099206208",
         "review_state": "REQUEST_CHANGES"
       }
     ],
-    "evidence": "Clean isolated checkout. Official Julia 1.12.6 SHA256 verified, own depot CPU. Original PR23 test 1+62 passed. Geometry 12/12, stored factors 8/8, four-field/single-column omission reproduction 9+5 passed. Separate block hypothesis 2/3 plus geometry, exit 1: no sphere-sphere admissible H(A). Motion/passive control 72/72. Tag 1 directly moves 1248 of 1280 sphere faces; unused tag 3 removes motion and force, all sphere q=0 Pa/m; six pointwise errors both excitations documented in review. Passive max BEM pressure relative error 1.03352e-5. No h343/GPU/performance qualification. Review read back.",
+    "evidence": "Julia 1.12.6 verified, fresh clone and isolated CPU depot. Original test 79 pass exit 0. Old vs free sphere tag: 1248 vs 0 driven faces; 8 independent checks plus 4 repo checks. At each frequency 32 cross and 0 sphere-only low-rank blocks. Missing column/field checks fixed. Full two-frequency injected empty electric current on both sides still yielded 0.000e+00 and exited 0 (87 pass including 8 preconditions). Actual current relative error 1.274e-11 per excitation, max all outputs 1.034e-5 BEM pressure; 2306 exact Neumann zeros each, 0 Pa/m absolute. No production changes or GPU/full gate. Published review verified.",
     "pending": [
       "PR14 N1/N2b2b756d awaits independent follow-up;row-quadrature/adjoint review and h343 qualification open.",
       "PR19 numerical/export findings and owner split/merge decision open;three ROM fixes verified.",
       "Issue12 VACS sample/format answers pending;PR17 merged;PR9 roadmap update planned.",
-      "PR23 378cba5 review 6098975675 requests independent passive-sphere tag, six outputs/two columns, and correct low-rank block description. Await author changes. Prior a696772 hook checks remain scoped; bundle/full gate/GPU/h343 open.",
+      "PR23 cf22370: passive sphere, block and missing-column corrections verified. Review 6099206208 requests expected output lengths and empty-current regression on both paths. Hardware and larger-mesh qualifications remain.",
       "PR22 df4d4a1 calibration fieldpath P2 fix verified6097911865;220tests+fullsweep. ActualF32fields andseparatereevaluation;undercoveragevswrongthresholddecisionscorrected;calibratedfactorsstillundercoverholdout. Priorstorage/projection/synthesis/timingfixes verifiedpreviousruns. Awaitnewwork/assembly/hardwarequalification;nooverallapproval."
     ],
     "continuation": "Continue new or independently actionable work only. Do not repeat unchanged findings, acknowledgments, owner questions. Normal external review/data/hardware waits do not pause routine."
