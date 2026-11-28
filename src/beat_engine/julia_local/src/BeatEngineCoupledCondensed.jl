@@ -772,10 +772,12 @@ interface `i`, `scale` the Neumann scale as used (`neumann_scale` in the scalar 
 `reference_scale` the same scale in Float64 from the Float64 density and the requested frequency (so the
 rounding of the scale is included). With `b_r` the stored
 absolute flux bound (`_field_input_bounds`, before storage), `u` the unit roundoff of the scalar type and
-`γ_m = m u₆₄ / (1 − m u₆₄)` in Float64, the error of the computed sum `Σ̂_i` against the exact
+`η` the smallest positive subnormal of the scalar type (gradual underflow of the storage, also of fluxes
+stored as zero), `γ_m = m u₆₄ / (1 − m u₆₄)` in Float64, the error of the computed sum `Σ̂_i` against the exact
 `Σ_r w_r q_r` is bounded by
 
-    A_i = Σ_r |w_r| (b_r + c |q̂_r|) + |Σ̂_i − S_i| + √2 γ_n Σ_r |w_r| |q̂_r|,   c = √2 u / (1 − √2 u),
+    A_i = Σ_r |w_r| (b_r + c |q̂_r| + d) + |Σ̂_i − S_i| + √2 γ_n Σ_r |w_r| |q̂_r|,
+    c = √2 u / (1 − √2 u),   d = (η / √2) / (1 − √2 u),
 
 where `S_i` is the same sum of the stored values in Float64 (the products of scalar-type values are exact
 in Float64, so only its running sum rounds, `n = |ranges[i]|`). The rounding of the averaging is thus
@@ -805,6 +807,9 @@ function interface_velocity_error_estimates(system, interface_flux, ranges, weig
     u64 = eps(Float64) / 2
     gamma64(m) = m * u64 / (1 - m * u64)
     store_rounding = sqrt(2.0) * u / (1 - sqrt(2.0) * u)
+    # gradual underflow of the storage: each real part rounds by ≤ max(u |x|, η/2), so a complex entry
+    # by ≤ (u |q̂| + η/√2) / (1 − u); also for entries stored as zero
+    store_underflow = Float64(nextfloat(zero(T))) / sqrt(2.0) / (1 - sqrt(2.0) * u)
     s_hat = ComplexF64(scale); s = ComplexF64(reference_scale)
     (iszero(s_hat) || iszero(s)) && throw(ArgumentError("the Neumann scale is zero"))
     scale_term = abs(s_hat - s) / (abs(s_hat) * abs(s))
@@ -828,7 +833,7 @@ function interface_velocity_error_estimates(system, interface_flux, ranges, weig
             # the driver stores the average as Complex{T} (`rows`); exact when it already is one
             output = Complex{T}(computed)
             reference_sum = sum(ComplexF64.(w) .* ComplexF64.(stored); init=zero(ComplexF64))
-            absolute_sum = sum(aw .* (b .+ store_rounding .* q); init=0.0) +
+            absolute_sum = sum(aw .* (b .+ store_rounding .* q .+ store_underflow); init=0.0) +
                            abs(ComplexF64(computed_sum) - reference_sum) + sqrt(2.0) * gamma64(length(range)) * magnitude
             quotient = ComplexF64(computed_sum) / s_hat
             value = abs(ComplexF64(output))

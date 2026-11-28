@@ -850,3 +850,30 @@ end
         release_condensed_coupled_system!(system)
     end
 end
+
+@testset "interface velocity estimate: gradual underflow of the flux storage is covered (REVIEW-22-40adbc2)" begin
+    eta = Float64(nextfloat(0.0f0))
+    system = (scalar_type=Float32, factorization=(field_input_bounds=(flux=zeros(1, 1),),))
+    withenv("BLAB_OUTPUT_ERROR_HINT" => "1e-3") do
+        for before in ComplexF64[0.6eta, 1.4eta, 0.4eta, 0.6eta * im, 1.4eta - 0.4eta * im, 3.7eta + 2.2eta * im,
+                                 1.0e-40 + 2.5e-41im]
+            stored = ComplexF32(before)
+            estimate = OE.interface_velocity_error_estimates(system, [[stored]], [1:1], [[1.0f0]], 1.0f0im, 1.0im)
+            output = ComplexF32(sum([1.0f0] .* [stored]) / 1.0f0im)          # as the driver stores it
+            # 256-bit reference of the exact average of the flux before storage
+            exact = setprecision(BigFloat, 256) do
+                Complex{BigFloat}(before) / Complex{BigFloat}(0, 1)
+            end
+            error = Float64(abs(Complex{BigFloat}(output) - exact))
+            if iszero(output)
+                @test isinf(estimate[1, 1])
+            else
+                @test estimate[1, 1] * abs(ComplexF64(output)) >= error
+            end
+            diagnostics = OE.interface_velocity_error_diagnostics!(Dict{String,Any}(), system, "iv", [[stored]],
+                                                                   [1:1], [[1.0f0]], 1.0f0im, 1.0im)
+            error > 1e-3 * abs(ComplexF64(output)) &&
+                @test diagnostics["dense_output_recompute_float64"] == true
+        end
+    end
+end
