@@ -64,6 +64,16 @@ DRIVER.COMPILED_WORKER_LOAD[] = Dict(
         BEAT_COMPILED_BUNDLE_NAME === nothing ? "backend_has_no_compiled_bundle" : BEAT_COMPILED_BUNDLE_ERROR[],
 )
 
+# BLAB_COUPLED_BEM_SOLVER=hmatrix (roadmap step 6): register the external BEM solver at top level,
+# before the first request, so the switch works through this worker without a custom wrapper.
+try
+    DRIVER.load_external_bem_solver_from_env!()
+catch exception
+    showerror(stderr, exception, catch_backtrace())
+    println(stderr)
+    exit(1)
+end
+
 if "--worker" in ARGS
     try
         DRIVER.run_worker()

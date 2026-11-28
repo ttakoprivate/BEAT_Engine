@@ -49,7 +49,10 @@ export assemble_condensed_regular_operators,
     solve_condensed_coupled_system,
     solve_condensed_coupled_systems,
     assemble_condensed_bem_operators,
-    release_condensed_bem_operators!
+    release_condensed_bem_operators!,
+    register_external_bem_solver!,
+    unregister_external_bem_solver!,
+    external_bem_solver_from_env
 
 """
     _interior_partition(fem_system, interface_operators, retained_vertices)
@@ -320,6 +323,16 @@ function dense_solver_diagnostics(system)
 end
 
 function _dense_solver_diagnostics(system)
+    # An external BEM solver (roadmap step 6) owns the factorization; its own diagnostics are reported
+    # under `coupled_bem_solver_diagnostics`, so no dense solver is claimed here.
+    if hasproperty(system, :bem_solver) && system.bem_solver == :external
+        return Dict{String,Any}(
+            "dense_solver" => nothing,
+            "dense_refinement_iterations" => 0,
+            "dense_refinement_fallback_reason" => nothing,
+            "dense_refinement_backward_error" => nothing,
+        )
+    end
     factorization = hasproperty(system, :factorization) ? system.factorization : nothing
     if factorization isa SplitGMRES
         return Dict{String,Any}(
@@ -2072,6 +2085,62 @@ end
 """Release an `assemble_condensed_bem_operators` result nobody consumed (host arrays only)."""
 release_condensed_bem_operators!(produced, bem_backend::Symbol) = nothing
 
+# External BEM solvers selectable with BLAB_COUPLED_BEM_SOLVER (roadmap step 6). The engine itself
+# carries no external solver and no dependency for one: a solver (e.g. the H-matrix solver in
+# hmatrix_dev/hmat_engine_solver.jl, which needs Krylov/FMM3D) registers a factory here after it is
+# loaded. Without a registration the switch fails loudly instead of silently solving densely.
+const _EXTERNAL_BEM_SOLVERS = Dict{String,Any}()
+
+"""
+    register_external_bem_solver!(name, factory)
+
+Make `BLAB_COUPLED_BEM_SOLVER=name` select an external BEM solver. `factory()` is called once per
+request and returns `(; bem_solver, diagnostics)`: `bem_solver` is the hook of
+`build_condensed_coupled_system(...; bem_solver)`; `diagnostics()` (or `nothing`) returns a
+`Dict{String,Any}` for the frequency just solved, or `nothing`. The names `dense` and the empty
+name are reserved for the default dense path.
+"""
+function register_external_bem_solver!(name::AbstractString, factory)
+    key = lowercase(strip(String(name)))
+    key in ("", "dense") && throw(ArgumentError("The external BEM solver name \"$key\" is reserved for the dense path."))
+    _EXTERNAL_BEM_SOLVERS[key] = factory
+    return nothing
+end
+
+"""Remove a registration made by `register_external_bem_solver!` (tests)."""
+unregister_external_bem_solver!(name::AbstractString) =
+    (delete!(_EXTERNAL_BEM_SOLVERS, lowercase(strip(String(name)))); nothing)
+
+"""
+    external_bem_solver_from_env(; condensed, env=ENV)
+
+Read BLAB_COUPLED_BEM_SOLVER. Unset, empty or `dense` returns `nothing` (the dense path, unchanged).
+Any other value must name a registered solver and needs the condensed coupled solver (`condensed`);
+it returns `(; name, bem_solver, diagnostics)` from that solver's factory. Errors instead of falling
+back to the dense path, so a requested H-matrix run never reports dense results under its name.
+"""
+function external_bem_solver_from_env(; condensed::Bool, env=ENV)
+    name = lowercase(strip(String(get(env, "BLAB_COUPLED_BEM_SOLVER", "dense"))))
+    name in ("", "dense") && return nothing
+    factory = get(_EXTERNAL_BEM_SOLVERS, name, nothing)
+    if isnothing(factory)
+        known = isempty(_EXTERNAL_BEM_SOLVERS) ? "none" : join(sort!(collect(keys(_EXTERNAL_BEM_SOLVERS))), ", ")
+        error("BLAB_COUPLED_BEM_SOLVER=$name: no external BEM solver of that name is loaded (registered: $known). " *
+              "The H-matrix solver lives in hmatrix_dev/hmat_engine_solver.jl and registers itself as \"hmatrix\" " *
+              "once it is loaded with its packages; use \"dense\" for the default path.")
+    end
+    condensed || error("BLAB_COUPLED_BEM_SOLVER=$name needs the condensed coupled solver " *
+                       "(static condensation on the CPU or Metal backend).")
+    made = factory()
+    hasproperty(made, :bem_solver) || error("The factory of external BEM solver \"$name\" must return (; bem_solver, diagnostics).")
+    # `bem_solver=nothing` would make the builder take the dense branch while the result carries this
+    # solver's name, so a factory without a hook is an error, not a silent dense run.
+    isnothing(made.bem_solver) && error("The factory of external BEM solver \"$name\" returned bem_solver=nothing; " *
+                                        "it must return the hook of build_condensed_coupled_system(...; bem_solver).")
+    diagnostics = hasproperty(made, :diagnostics) ? made.diagnostics : nothing
+    return (; name, bem_solver=made.bem_solver, diagnostics)
+end
+
 """
     build_condensed_coupled_system(fem_mesh, bem_mesh, interface_map, frequency_hz, sound_speed, density; ...)
 
@@ -2108,7 +2177,26 @@ function build_condensed_coupled_system(
     schur_block_columns::Int=32,
     allow_transducer_condensation::Bool=true,
     bem_operators=nothing,
+    bem_solver=nothing,
 ) where {T<:AbstractFloat}
+    # `bem_solver` (default `nothing`: dense BEM path, unchanged) replaces the dense BEM assembly by an
+    # external operator (roadmap step 6, H-matrix path behind a switch). Contract:
+    #   bem_solver(context) -> (; flux_operator_mul, factorize)
+    #   context: (; bem_mesh, prepared, wavenumber, singular_order, symmetry_mode, scalar_type)
+    #   flux_operator_mul(Q) = C * Q, with C the Burton-Miller right-hand operator of the dense path
+    #     (the dense path writes A to the BEM rows and C * bem_flux / C * bem_motion_flux next to it);
+    #   factorize(rest, layout) -> an object with `size` and `\` (matrix of right-hand sides), like
+    #     `SplitGMRES`. `rest` is the sparse system without the BEM operator entries: rows
+    #     `layout.bem_range` hold only what is not A or C (nothing at present). The solver must apply
+    #     rows bem_range as rest + A x[bem_range] + C (bem_flux x[flux_range] + bem_motion_flux x[mechanical_range]).
+    #   Optional, required only with `retain_interface_radiation=true`:
+    #   exterior_solve(R) = A \ R for a matrix of right-hand sides (the exterior Burton-Miller operator
+    #     alone, without the coupled rows). The interface radiation replay then forms its right-hand
+    #     sides as -C * (bem_flux * flux) through `flux_operator_mul`, never as a dense C * bem_flux block.
+    # The interface elimination is forced off (:none layout); no dense BEM block is ever formed.
+    if !isnothing(bem_solver)
+        isnothing(bem_operators) || error("An external BEM solver cannot be combined with prefetched dense BEM operators.")
+    end
     # `relative_residual` needs the monolithic coupled matrix, which this formulation never
     # forms. `fem_interior_residual` on each solution is the condensed-appropriate check.
     validation_diagnostics && error(
@@ -2193,16 +2281,17 @@ function build_condensed_coupled_system(
         error("Coupled cache retained FEM vertices do not match the current moving surfaces.")
 
     # Flux-carrying DP0 faces: only these C columns are ever multiplied by a nonzero flux.
-    active_flux_columns = if prepared.bem_backend == :metal && _metal_compact_flux_enabled()
+    active_flux_columns = if isnothing(bem_solver) && prepared.bem_backend == :metal && _metal_compact_flux_enabled()
         motion_map = isempty(transducers) ? nothing : resolved_transducer_operators.bem_normal_velocity
         _active_flux_rows(prepared.dp0.global_dof_count, prepared.interface_operators.bem_flux, motion_map,
                           prescribed_bem_normal_velocity)
     else
         nothing
     end
-    assembly_plan, combined_identity = _condensed_bem_assembly_plan(
+    # An external BEM solver assembles nothing densely: no combined-assembly plan, no device identity cache.
+    assembly_plan, combined_identity = isnothing(bem_solver) ? _condensed_bem_assembly_plan(
         condensed_cache, prepared, T, selected_quadrature_order; active_columns=active_flux_columns,
-    )
+    ) : ((mode=:external, fallback_reason=nothing), nothing)
     assembly_plan.fallback_reason === nothing || push!(optimization_fallbacks,
         "combined Metal BEM assembly not used: " * assembly_plan.fallback_reason)
 
@@ -2283,6 +2372,11 @@ function build_condensed_coupled_system(
         schur_float64=dense_type === Float64,
     )
     interface_elimination, elimination_required = _interface_elimination_request(bem_backend)
+    if !isnothing(bem_solver) && interface_elimination != :none
+        # The :pressure/:flux layouts fold dense BEM blocks into the system; an operator has none to fold.
+        push!(optimization_fallbacks, "interface elimination not used: external BEM solver")
+        interface_elimination = :none
+    end
     elimination_map = nothing
     if interface_elimination != :none
         try
@@ -2350,10 +2444,12 @@ function build_condensed_coupled_system(
     # The FEM task may be running from here until it is fetched below. A failure in between joins it
     # before propagating, so the caller's cleanup never releases a solver the task is still using.
     local prefetched, operators, bem_operator_s, bem_lhs, bem_rhs_operator, bem_interface_block,
-          bem_combine_s, bem_motion_block, bem_prescribed_rhs, interface_radiation_replay, bem_matrix_s
+          bem_combine_s, bem_motion_block, bem_prescribed_rhs, interface_radiation_replay, bem_matrix_s,
+          external_bem
     # Split dense storage copies `bem_lhs` straight from the device-backed host view and frees it
     # right after (no host copy of A and no negated copy of C; see `_combine_condensed_bem_operators!`).
-    keep_device = T === Float32 && _dense_double_assembly(bem_backend) && _dense_refinement_enabled(bem_backend) &&
+    external_bem = nothing
+    keep_device = isnothing(bem_solver) && T === Float32 && _dense_double_assembly(bem_backend) && _dense_refinement_enabled(bem_backend) &&
                   _dense_split_enabled()
     bem_release = () -> nothing
     bem_adopt = order -> nothing
@@ -2362,6 +2458,36 @@ function build_condensed_coupled_system(
     adopt_order = (keep_device && interface_elimination == :flux && _metal_adopt_enabled()) ?
                   length(bem_mesh.vertices) + 2 * transducer_count : 0
     try
+      if !isnothing(bem_solver)
+        bem_operator_started = time_ns()
+        prefetched = nothing
+        operators = nothing
+        external_bem = bem_solver((
+            bem_mesh=bem_mesh, prepared=prepared, wavenumber=wavenumber, singular_order=singular_order,
+            symmetry_mode=prepared.symmetry_mode, scalar_type=T,
+        ))
+        bem_operator_s = (time_ns() - bem_operator_started) / 1.0e9
+        bem_matrix_started = time_ns()
+        bem_lhs = nothing
+        bem_rhs_operator = nothing
+        bem_interface_block = nothing
+        bem_combine_s = 0.0
+        bem_motion_block = nothing
+        # The dense path forms `-C * prescribed`; the external operator applies C.
+        bem_prescribed_rhs = prescribed_bem_count == 0 ?
+                             zeros(Complex{T}, length(bem_mesh.vertices), 0) :
+                             Complex{T}.(-external_bem.flux_operator_mul(bem_prescribed_neumann))
+        interface_radiation_replay = if retain_interface_radiation
+            hasproperty(external_bem, :exterior_solve) || error(
+                "retain_interface_radiation with an external BEM solver needs its `exterior_solve` (A \\ R).",
+            )
+            (backend=:external, flux_operator_mul=external_bem.flux_operator_mul,
+             exterior_solve=external_bem.exterior_solve)
+        else
+            nothing
+        end
+        bem_matrix_s = (time_ns() - bem_matrix_started) / 1.0e9
+      else
         bem_operator_started = time_ns()
         prefetched = nothing
         operators = if isnothing(bem_operators)
@@ -2403,6 +2529,7 @@ function build_condensed_coupled_system(
             interface_block=Array(bem_interface_block),
         ) : nothing
         bem_matrix_s = (time_ns() - bem_matrix_started) / 1.0e9
+      end
     catch
         bem_release()
         if !isnothing(condensation_task)
@@ -2478,7 +2605,7 @@ function build_condensed_coupled_system(
     # Split storage (BeatEngineSplitDense.jl): ComplexF32 everywhere plus exact ComplexF64
     # corrections on the rows/columns that FEM-side double-precision blocks touch. The BEM block
     # outside the Γ-mapped columns holds only `bem_lhs` (Complex{T} == ComplexF32) and needs none.
-    split_dense = dense_type === Float64 && T === Float32 && _dense_refinement_enabled(bem_backend) &&
+    split_dense = isnothing(external_bem) && dense_type === Float64 && T === Float32 && _dense_refinement_enabled(bem_backend) &&
                   _dense_split_enabled()
     lhs_adopted = false
     coupled = if split_dense
@@ -2496,6 +2623,9 @@ function build_condensed_coupled_system(
             SplitDenseMatrix(adopt_square_storage(address, bem_count, system_count), non_bem,
                              vcat(non_bem, gamma_bem_columns))
         end
+    elseif !isnothing(external_bem)
+        # Everything but the BEM operator rows; the external solver applies A and C itself.
+        spzeros(Complex{dense_type}, system_count, system_count)
     else
         zeros(Complex{dense_type}, system_count, system_count)
     end
@@ -2509,8 +2639,10 @@ function build_condensed_coupled_system(
             -Complex{T}.(Matrix(interface_operators.fem_load[gamma_fem_vertices, :]))
         coupled[flux_range, gamma_range] =
             Complex{T}.(Matrix(interface_operators.fem_trace[:, gamma_fem_vertices]))
-        coupled[bem_range, bem_range] = bem_lhs
-        coupled[bem_range, flux_range] = bem_interface_block
+        if isnothing(external_bem)
+            coupled[bem_range, bem_range] = bem_lhs
+            coupled[bem_range, flux_range] = bem_interface_block
+        end
         coupled[flux_range, bem_range] = -Complex{T}.(Matrix(interface_operators.bem_trace))
     end
     if transducer_count > 0 && transducer_condensation
@@ -2540,7 +2672,7 @@ function build_condensed_coupled_system(
         coupled[mechanical_range, mechanical_range] = Matrix(Diagonal(mechanical_impedance))
     end
     if transducer_count > 0
-        coupled[bem_range, mechanical_range] = bem_motion_block
+        isnothing(external_bem) && (coupled[bem_range, mechanical_range] = bem_motion_block)
         coupled[mechanical_range, bem_range] =
             Complex{T}.(transpose(Matrix(resolved_transducer_operators.bem_force)))
         coupled[mechanical_range, electrical_range] =
@@ -2673,7 +2805,13 @@ function build_condensed_coupled_system(
         bem_release()
         GC.gc()
     end
-    factorization = if coupled isa SplitDenseMatrix
+    factorization = if !isnothing(external_bem)
+        external_bem.factorize(coupled, (
+            bem_range=bem_range, flux_range=flux_range, gamma_range=gamma_range,
+            mechanical_range=mechanical_range, electrical_range=electrical_range,
+            bem_flux=interface_operators.bem_flux, bem_motion_flux=bem_motion_flux,
+        ))
+    elseif coupled isa SplitDenseMatrix
         _dense_solver_mode() == "gmres" ? SplitGMRES(coupled) : SplitRefinedLU(coupled)
     elseif dense_type === Float64 && T !== Float64 && _dense_refinement_enabled(bem_backend)
         RefinedDenseLU(coupled)
@@ -2700,6 +2838,8 @@ function build_condensed_coupled_system(
         coupled=nothing,
         factorization=factorization,
         dense_lhs_adopted=lhs_adopted,
+        # :dense, or :external when `bem_solver` replaced the dense BEM assembly.
+        bem_solver=isnothing(external_bem) ? :dense : :external,
         formulation=:fem_interface_condensed,
         # The order the assembly actually used, so diagnostics report what ran, not what was asked.
         regular_quadrature_order=selected_quadrature_order,

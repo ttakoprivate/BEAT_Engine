@@ -94,15 +94,21 @@ function hbuild_c_gpu(o, op, g::KAGeom, todev, rowroot::HCluster, colroot::HClus
     states = Vector{ACAState}(undef, length(adm_pairs))
     Threads.@threads for t in eachindex(adm_pairs); a, b = adm_pairs[t]; states[t] = ACAState(a.idx, b.idx, hasnear(a.idx, b.idx)); end
     nb = LinearAlgebra.BLAS.get_num_threads(); LinearAlgebra.BLAS.set_num_threads(1)
-    ta = @elapsed (rounds, tdev) = aca_batched(states, entries, tol / 10)
-    lr = Vector{LowRank{ComplexF64}}(undef, length(states))
-    tr = @elapsed Threads.@threads for t in eachindex(states)
-        s = states[t]; kk = length(s.U)
-        U = kk == 0 ? zeros(ComplexF64, length(s.I), 0) : reduce(hcat, s.U)
-        V = kk == 0 ? zeros(ComplexF64, length(s.J), 0) : reduce(hcat, s.V)
-        U, V = recompress(U, V, tol); lr[t] = LowRank(s.I, s.J, U, V)
+    # Restore the process-wide BLAS thread count also when the build throws: the persistent JSON
+    # worker catches request errors and would otherwise run every later request single-threaded.
+    local rounds, tdev, ta, tr, lr
+    try
+        ta = @elapsed (rounds, tdev) = aca_batched(states, entries, tol / 10)
+        lr = Vector{LowRank{ComplexF64}}(undef, length(states))
+        tr = @elapsed Threads.@threads for t in eachindex(states)
+            s = states[t]; kk = length(s.U)
+            U = kk == 0 ? zeros(ComplexF64, length(s.I), 0) : reduce(hcat, s.U)
+            V = kk == 0 ? zeros(ComplexF64, length(s.J), 0) : reduce(hcat, s.V)
+            U, V = recompress(U, V, tol); lr[t] = LowRank(s.I, s.J, U, V)
+        end
+    finally
+        LinearAlgebra.BLAS.set_num_threads(nb)
     end
-    LinearAlgebra.BLAS.set_num_threads(nb)
-    @printf("   C build: near exact %.1fs, dense %.1fs, ACA %.1fs (%d rounds, device %.1fs), recompress %.1fs\n", tn, td, ta, rounds, tdev, tr)
+    @printf(stderr, "   C build: near exact %.1fs, dense %.1fs, ACA %.1fs (%d rounds, device %.1fs), recompress %.1fs\n", tn, td, ta, rounds, tdev, tr)
     return HMat{ComplexF64}(n, m, lr, dn)
 end
