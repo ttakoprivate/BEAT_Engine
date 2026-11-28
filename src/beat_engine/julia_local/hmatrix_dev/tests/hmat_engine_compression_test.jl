@@ -46,19 +46,38 @@ function compression_pointwise_error(reference, candidate)
      absolute_at_zero=maximum(abs.(c[.!nz]); init=0.0), zero_count=count(!, nz), scale=maximum(abs, r; init=0.0))
 end
 
-"""Structural problems of a result pair: column counts and the six required numeric outputs per column."""
-function compression_output_problems(reference, candidate, n_excitations)
+"""Structural problems of a result pair: column counts, the six required numeric outputs per column and their
+lengths. `expected_lengths` maps each output to the length the system defines (e.g. one diaphragm velocity and
+one voice-coil current per transducer); without it every output must at least be non-empty, so two equally
+empty vectors cannot pass as error 0 (REVIEW-23-cf22370)."""
+function compression_output_problems(reference, candidate, n_excitations; expected_lengths=nothing)
     problems = String[]
     length(reference) == n_excitations || push!(problems, "reference has $(length(reference)) columns, expected $(n_excitations)")
     length(candidate) == n_excitations || push!(problems, "candidate has $(length(candidate)) columns, expected $(n_excitations)")
     for (label, results) in (("reference", reference), ("candidate", candidate)), column in eachindex(results)
         for name in COMPRESSION_OUTPUTS
-            ok = hasproperty(results[column], name) && getproperty(results[column], name) isa AbstractArray{<:Number}
-            ok || push!(problems, "$(label) column $(column) lacks numeric $(name)")
+            value = hasproperty(results[column], name) ? getproperty(results[column], name) : nothing
+            if !(value isa AbstractArray{<:Number})
+                push!(problems, "$(label) column $(column) lacks numeric $(name)")
+            elseif expected_lengths !== nothing
+                n = getproperty(expected_lengths, name)
+                length(value) == n || push!(problems, "$(label) column $(column) $(name) has $(length(value)) entries, expected $(n)")
+            elseif isempty(value)
+                push!(problems, "$(label) column $(column) $(name) is empty")
+            end
         end
     end
     problems
 end
+
+"""Output lengths defined by a condensed coupled system (operator dimensions, not taken from a result)."""
+compression_expected_lengths(system) = (
+    fem_pressure=size(system.interface_operators.fem_trace, 2),
+    bem_pressure=size(system.interface_operators.bem_trace, 2),
+    bem_neumann=length(system.bem_mesh.faces),
+    interface_flux=size(system.interface_operators.bem_flux, 2),
+    diaphragm_velocity=length(system.transducers),
+    voice_coil_current=length(system.transducers))
 
 @testset "output guard rejects missing columns and outputs" begin
     full = NamedTuple{COMPRESSION_OUTPUTS}(ntuple(_ -> ComplexF64[1], length(COMPRESSION_OUTPUTS)))
@@ -67,6 +86,16 @@ end
     # Counterexample of REVIEW-23-378cba5 point 3: one candidate column without the transducer outputs.
     @test length(compression_output_problems([full, full], [partial], 2)) == 3
     @test length(compression_output_problems([full, full], [full, partial], 2)) == 2
+    # Counterexample of REVIEW-23-cf22370: the current emptied in both paths must not pass as error 0.
+    no_current = merge(full, (voice_coil_current=ComplexF64[],))
+    @test length(compression_output_problems([no_current, no_current], [no_current, no_current], 2)) == 4
+    lengths = NamedTuple{COMPRESSION_OUTPUTS}(ntuple(_ -> 1, length(COMPRESSION_OUTPUTS)))
+    @test isempty(compression_output_problems([full, full], [full, full], 2; expected_lengths=lengths))
+    @test length(compression_output_problems([no_current, no_current], [no_current, no_current], 2;
+                                             expected_lengths=lengths)) == 4
+    two_currents = merge(full, (voice_coil_current=ComplexF64[1, 2],))
+    @test compression_output_problems([full, full], [full, two_currents], 2; expected_lengths=lengths) ==
+          ["candidate column 2 voice_coil_current has 2 entries, expected 1"]
 end
 
 """Append a closed rigid icosphere (outward normals, `tag`) to a BEM mesh; returns the new mesh."""
@@ -150,8 +179,14 @@ with_baseline_cpu_coupled() do
                     ratio = maximum(abs, p[nB0+1:end]) / maximum(abs, p[1:nB0])
                     @printf("    max |p| sphere / enclosure %.3e\n", ratio)
                     @test ratio > 1e-3
-                    # Both excitation columns, every required output (REVIEW-23-378cba5 point 3).
-                    problems = compression_output_problems(reference, candidate, length(excitations))
+                    # Both excitation columns, every required output with its system-defined length (REVIEW-23-378cba5 point 3,
+                    # REVIEW-23-cf22370).
+                    expected = compression_expected_lengths(dense)
+                    # One driver: exactly one diaphragm velocity and one current per excitation (REVIEW-23-cf22370).
+                    @test expected.diaphragm_velocity == 1 && expected.voice_coil_current == 1
+                    @test expected.bem_pressure == length(bem.vertices)
+                    problems = compression_output_problems(reference, candidate, length(excitations);
+                                                           expected_lengths=expected)
                     foreach(println, problems)
                     @test isempty(problems)
                     for column in (isempty(problems) ? eachindex(excitations) : (1:0))
