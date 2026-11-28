@@ -200,6 +200,19 @@ function _refine_fallback!(acceptance!, fallback, solution, residual, factorizat
 end
 
 const DENSE_ESTIMATE_MAX_CONTRACTION = 0.5
+# Componentwise bound (see _dense_error_estimate). The rounding δr of the Float64 residual is
+# bounded componentwise by f = γ (|b| + |A| |x|), γ = 2√2 (n + 2) eps(Float64) (complex inner
+# products, worst case), and its effect ‖A⁻¹ δr‖_∞ <= ‖A⁻¹ diag(f)‖_∞ is estimated with the
+# Hager-Higham 1-norm estimator on the adjoint (LAPACK's FERR approach) using the factor M, times
+# DENSE_NORM_ESTIMATE_MARGIN for the estimator (a lower bound, normally within a factor 3) and
+# 1/(1-ρ) for M⁻¹ vs A⁻¹. The margin is not a guarantee: a mode that none of the search directions
+# excites can be missed entirely (review of 25b7064: rank-one mode, estimate 1 vs norm 4.2e6, pinned
+# in output_error_estimate_tests.jl), so the bound and the hint stay heuristic and must not alone
+# release automatic decisions. This replaces the former fixed σ ‖d‖, which a residual rounded to (near)
+# zero defeats (review REVIEW-22-b5ea266, P1). Without an adjoint solve (device factor) the bound
+# is unknown.
+const DENSE_NORM_ESTIMATE_MARGIN = 3.0
+const DENSE_NORM_ESTIMATE_ITERATIONS = 4
 _dense_error_estimate_enabled() = !(lowercase(strip(get(ENV, "BLAB_DENSE_ERROR_ESTIMATE", "1"))) in ("0", "off", "false"))
 
 _pow2_exponent(m) = (iszero(m) || !isfinite(m)) ? 0 : exponent(m)
@@ -209,18 +222,66 @@ _residual_scales(residual, target, solution) =
     [exp2(-_pow2_exponent(norm(view(residual, :, j), Inf)) + _pow2_exponent(norm(view(target, :, j), Inf)) -
           _pow2_exponent(norm(view(solution, :, j), Inf))) for j in axes(residual, 2)]
 
+"""Componentwise bound `γ (|b| + |A| |x|)` of the rounding of a Float64 residual `b - A x` (n × n)."""
+_residual_rounding(target, absolute, n) =
+    (2 * sqrt(2.0) * (n + 2) * eps(Float64)) .* (_abs_entry.(target) .+ absolute)
+
 """
-    _dense_error_estimate(apply, multiply, solution, residual, target) -> (estimates, direction_check_passed)
+    _inverse_scaled_norm(apply, apply_adjoint, f) -> Vector{Float64}
+
+Per column j an estimate (from below, Hager 1984 / Higham 1988) of `‖M⁻¹ diag(f_j)‖_∞`, i.e. of
+`max_i (|M⁻¹| f_j)_i`, via the 1-norm of `diag(f_j) M⁻ᴴ`. Columns are scaled to max 1 inside so the
+Float32 solves neither under- nor overflow. `NaN` where `f_j` is not finite.
+"""
+function _inverse_scaled_norm(apply, apply_adjoint, f::AbstractMatrix{Float64})
+    n, k = size(f)
+    scale = [maximum(view(f, :, j); init=0.0) for j in 1:k]
+    result = fill(NaN, k)
+    usable = [isfinite(s) for s in scale]
+    any(usable) || return result
+    g = f[:, usable] ./ transpose(max.(scale[usable], floatmin(Float64)))
+    unit(z) = iszero(z) ? one(z) : z / abs(z)
+    adjoint_product(X) = g .* apply_adjoint(X)          # C X with C = diag(g) M⁻ᴴ
+    product(X) = apply(g .* X)                          # Cᴴ X
+    best = zeros(size(g, 2))
+    X = fill(ComplexF64(1 / n), n, size(g, 2))
+    for iteration in 1:DENSE_NORM_ESTIMATE_ITERATIONS
+        Y = adjoint_product(X)
+        best .= max.(best, vec(sum(abs, Y; dims=1)))
+        iteration == DENSE_NORM_ESTIMATE_ITERATIONS && break
+        Z = product(unit.(Y))
+        X = zeros(ComplexF64, n, size(g, 2))
+        for j in axes(Z, 2)
+            X[argmax(abs.(view(Z, :, j))), j] = 1
+        end
+    end
+    alternating = [ComplexF64((-1)^(i + 1) * (1 + (i - 1) / max(n - 1, 1))) for i in 1:n]
+    Y = adjoint_product(repeat(alternating, 1, size(g, 2)))
+    best .= max.(best, 2 .* vec(sum(abs, Y; dims=1)) ./ (3n))
+    result[usable] .= ifelse.(isfinite.(best), best, NaN) .* scale[usable]
+    return result
+end
+
+"""
+    _dense_error_estimate(apply, multiply, solution, residual, target; apply_adjoint, rounding)
+        -> (estimates, direction_check_passed, componentwise_bound)
 
 `apply(r)` applies the solver's factor M⁻¹, `multiply(y)` returns `A y` in Float64, `residual` is
 the final residual `target - A solution`. See the comment above `DENSE_ESTIMATE_MAX_CONTRACTION`.
+`apply_adjoint(r)` applies M⁻ᴴ and `rounding` is the componentwise bound of the residual rounding
+(`_residual_rounding`); without either the componentwise bound is unknown (NaN).
 """
 function _dense_error_estimate(apply, multiply, solution::AbstractMatrix, residual::AbstractMatrix,
-                               target::AbstractMatrix)
+                               target::AbstractMatrix; apply_adjoint=nothing, rounding=nothing)
     scales = _residual_scales(residual, target, solution)
     d = apply(residual .* transpose(scales))          # scaled d; unscaled below
     w = apply(multiply(d))
+    # `rounding` may be a function, evaluated after `multiply` (which may compute |A| |x| in its pass)
+    rounding = rounding isa Function ? rounding() : rounding
+    rounding_norm = (isnothing(apply_adjoint) || isnothing(rounding)) ? fill(NaN, size(solution, 2)) :
+                    _inverse_scaled_norm(apply, apply_adjoint, rounding)
     estimates = Float64[]; passed = Bool[]
+    bound = fill(NaN, size(solution))                 # componentwise bound, see _output_error_bound
     for j in axes(solution, 2)
         rn = norm(view(residual, :, j), Inf); bn = norm(view(target, :, j), Inf)
         xn = norm(view(solution, :, j), Inf)
@@ -238,10 +299,34 @@ function _dense_error_estimate(apply, multiply, solution::AbstractMatrix, residu
         ok = isfinite(rho) && rho <= DENSE_ESTIMATE_MAX_CONTRACTION
         estimate = (ok ? e / (1 - rho) : e) / scales[j] / x
         # a residual of the size of the right-hand side means the solution is not trustworthy either
-        push!(passed, ok && isfinite(estimate) && !(rn >= bn / 2 && !iszero(rn)))
+        check = ok && isfinite(estimate) && !(rn >= bn / 2 && !iszero(rn))
+        push!(passed, check)
         push!(estimates, isfinite(estimate) ? estimate : NaN)
+        if check && isfinite(rounding_norm[j])
+            # With r̂ = r + δr the computed residual (r = A err, err = x* - x) and E = I - M⁻¹A:
+            #   err = (I - E)⁻¹ d - A⁻¹ δr,  (I - E)⁻¹ d - d = E (I - E)⁻¹ d, hence
+            #   |err_i| <= |d_i| + ρ/(1-ρ) ‖d‖ + ‖A⁻¹ diag(f)‖,  ‖A⁻¹ diag(f)‖ <= ‖M⁻¹ diag(f)‖/(1-ρ).
+            # ρ estimates ‖E‖ in the direction of d only and the norm is estimated (×margin), so the
+            # bound inherits the heuristic caveat above. A failed check leaves NaN (unknown).
+            propagated = DENSE_NORM_ESTIMATE_MARGIN * rounding_norm[j] / (1 - rho)
+            bound[:, j] .= (abs.(view(d, :, j)) .+ rho / (1 - rho) * e) ./ scales[j] .+ propagated
+        end
     end
-    return estimates, passed
+    return estimates, passed, bound
+end
+
+"""
+    _output_error_bound(bound, solution, rows) -> Vector{Float64}
+
+Estimated complex relative solver error `|x*_i - x_i| / |x_i|` of the solution entries `rows` of
+one column, from the componentwise `bound` of `_dense_error_estimate`. `NaN` (unknown) where the
+bound is unknown; `Inf` where the entry is zero but its bound is not; `0` where both are zero.
+"""
+function _output_error_bound(bound::AbstractVector, solution::AbstractVector, rows)
+    return [begin
+                b = bound[i]; x = abs(ComplexF64(solution[i]))
+                isnan(b) ? NaN : iszero(b) ? 0.0 : iszero(x) ? Inf : b / x
+            end for i in rows]
 end
 const DENSE_GMRES_IR_RESTART = 30
 const DENSE_GMRES_IR_MAX_CYCLES = 10
@@ -601,6 +686,9 @@ mutable struct SplitRefinedLU
     componentwise_tolerance::Float64          # NaN when BLAB_COUPLED_DENSE_COMPONENTWISE=0
     estimated_error::Vector{Float64}          # per column of the last solve, see _dense_error_estimate
     estimate_direction_check::Vector{Bool}
+    error_bound::Matrix{Float64}              # componentwise solver-error bound of the last solve
+    output_estimates::Union{Nothing,Dict{Symbol,Matrix{Float64}}}   # set by the coupled solve
+    field_input_bounds::Union{Nothing,NamedTuple}   # set by the coupled solve, see _store_field_input_bounds!
     spill_path::Union{Nothing,String}
     # A factor held elsewhere (the CUDA LU on the device): `device_solve(x::Matrix{ComplexF32})`
     # returns the ComplexF64 host solution, `release_device()` frees it. `factor` is then nothing.
@@ -625,7 +713,7 @@ function SplitRefinedLU(matrix::SplitDenseMatrix)
     matrix_norm = _split_opnorm_inf(matrix.hi, matrix)
     store, spill_path = isnothing(spill_directory) ? (matrix.hi, nothing) : _split_spill(matrix.hi, spill_directory)
     refined = SplitRefinedLU(matrix, store, matrix_norm, nothing, nothing, 0, 0, nothing, NaN, NaN,
-                             _split_componentwise_tolerance(n), Float64[], Bool[], spill_path, nothing, nothing, 0)
+                             _split_componentwise_tolerance(n), Float64[], Bool[], zeros(0, 0), nothing, nothing, spill_path, nothing, nothing, 0)
     if matrix.overflow
         _split_fall_back!(refined, "an entry is outside the Float32 range")
         return refined
@@ -659,7 +747,7 @@ function SplitRefinedLU(matrix::SplitDenseMatrix, device_solve::Function, releas
     store, spill_path = isnothing(spill_directory) ? (matrix.hi, nothing) : _split_spill(matrix.hi, spill_directory)
     isnothing(spill_path) || (matrix.hi = Matrix{ComplexF32}(undef, 0, 0))
     return SplitRefinedLU(matrix, store, matrix_norm, nothing, nothing, 0, 0, nothing, NaN, NaN,
-                          _split_componentwise_tolerance(n), Float64[], Bool[],
+                          _split_componentwise_tolerance(n), Float64[], Bool[], zeros(0, 0), nothing, nothing,
                           spill_path, device_solve, release_device, 0)
 end
 
@@ -764,14 +852,33 @@ end
 function _split_solve_columns(factorization::SplitRefinedLU, target::Matrix{ComplexF64})
     residual = similar(target)          # holds the final residual on every successful exit
     solution = _split_solve_columns!(factorization, target, residual)
+    factorization.output_estimates = nothing
+    factorization.field_input_bounds = nothing
     if _dense_error_estimate_enabled()
         apply = isnothing(factorization.fallback) ? (r -> _split_precondition(factorization, r)) :
                                                     (r -> factorization.fallback \ r)
-        multiply = y -> _split_mul!(similar(y), factorization.store, factorization.matrix, y, one(ComplexF64), zero(ComplexF64))
-        factorization.estimated_error, factorization.estimate_direction_check =
-            _dense_error_estimate(apply, multiply, solution, residual, target)
+        # one streaming pass over the matrix: A d for the direction check and |A| |x| (columns of x
+        # appended) for the residual-rounding bound
+        absolute_solution = Ref{Matrix{Float64}}()
+        multiply = function (y)
+            k = size(y, 2)
+            combined = hcat(y, solution)
+            absolute = Matrix{Float64}(undef, size(combined))
+            product = _split_mul!(similar(combined), factorization.store, factorization.matrix, combined,
+                                  one(ComplexF64), zero(ComplexF64); absolute)
+            absolute_solution[] = absolute[:, (k + 1):end]
+            return product[:, 1:k]
+        end
+        # M⁻ᴴ: not available for a factor held on the device, so the componentwise bound is unknown there
+        apply_adjoint = !isnothing(factorization.fallback) ? (r -> factorization.fallback' \ r) :
+                        isnothing(factorization.factor) ? nothing :
+                        (r -> ComplexF64.(factorization.factor' \ ComplexF32.(r)))
+        rounding = () -> _residual_rounding(target, absolute_solution[], size(solution, 1))
+        factorization.estimated_error, factorization.estimate_direction_check, factorization.error_bound =
+            _dense_error_estimate(apply, multiply, solution, residual, target; apply_adjoint, rounding)
     else
         factorization.estimated_error, factorization.estimate_direction_check = Float64[], Bool[]
+        factorization.error_bound = zeros(0, 0)
     end
     return solution
 end
@@ -915,6 +1022,10 @@ mutable struct SplitGMRES
     matvec_seconds::Float64
     fallback::Union{Nothing,SplitRefinedLU}
     fallback_reason::Union{Nothing,String}
+    # per-output estimates of the last coupled solve without fallback: unknown (NaN), see
+    # _store_output_estimates! (GMRES gives no componentwise bound)
+    output_estimates::Union{Nothing,Dict{Symbol,Matrix{Float64}}}
+    field_input_bounds::Union{Nothing,NamedTuple}
 end
 
 function SplitGMRES(matrix::SplitDenseMatrix)
@@ -934,7 +1045,7 @@ function SplitGMRES(matrix::SplitDenseMatrix)
                       _dense_gmres_setting("BLAB_COUPLED_DENSE_GMRES_TOL", 1e-10),
                       _dense_gmres_setting("BLAB_COUPLED_DENSE_GMRES_RESTART", 100),
                       _dense_gmres_setting("BLAB_COUPLED_DENSE_GMRES_MAXITER", 2000),
-                      0, 0, NaN, 0.0, 0.0, nothing, nothing)
+                      0, 0, NaN, 0.0, 0.0, nothing, nothing, nothing, nothing)
 end
 
 Base.size(solver::SplitGMRES, dims...) = size(solver.store, dims...)
@@ -942,6 +1053,8 @@ release_split_factor!(solver::SplitGMRES) = (solver.fallback === nothing || rele
 
 function Base.:\(solver::SplitGMRES, rhs::AbstractVecOrMat)
     all(isfinite, rhs) || throw(ArgumentError("dense coupled right-hand side has non-finite entries"))
+    solver.output_estimates = nothing
+    solver.field_input_bounds = nothing
     solver.fallback === nothing || return solver.fallback \ rhs
     started = time_ns()
     target = rhs isa AbstractVector ? reshape(ComplexF64.(rhs), :, 1) : ComplexF64.(rhs)

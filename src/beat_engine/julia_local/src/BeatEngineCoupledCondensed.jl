@@ -223,13 +223,16 @@ mutable struct RefinedDenseLU
     componentwise_tolerance::Float64        # NaN when BLAB_COUPLED_DENSE_COMPONENTWISE=0
     estimated_error::Vector{Float64}   # per column of the last solve (see _dense_error_estimate)
     estimate_direction_check::Vector{Bool}
+    error_bound::Matrix{Float64}       # componentwise solver-error bound of the last solve
+    output_estimates::Union{Nothing,Dict{Symbol,Matrix{Float64}}}   # set by the coupled solve
+    field_input_bounds::Union{Nothing,NamedTuple}   # set by the coupled solve, see _store_field_input_bounds!
     fallback_refinement_steps::Int     # most Float64 refinement steps after the fallback (any solve)
 end
 
 function RefinedDenseLU(matrix::Matrix{ComplexF64})
     all(isfinite, matrix) || throw(ArgumentError("dense coupled matrix has non-finite entries"))
     tolerance = _dense_componentwise_enabled() ? _dense_componentwise_tolerance(size(matrix, 1)) : NaN
-    refined = RefinedDenseLU(matrix, opnorm(matrix, Inf), nothing, nothing, 0, nothing, NaN, NaN, tolerance, Float64[], Bool[], 0)
+    refined = RefinedDenseLU(matrix, opnorm(matrix, Inf), nothing, nothing, 0, nothing, NaN, NaN, tolerance, Float64[], Bool[], zeros(0, 0), nothing, nothing, 0)
     if maximum(abs, matrix; init=0.0) > floatmax(Float32)
         _dense_fall_back!(refined, "an entry is outside the Float32 range")
     else
@@ -284,16 +287,21 @@ function Base.:\(factorization::RefinedDenseLU, rhs::AbstractVecOrMat)
     target = ComplexF64.(rhs)
     residual = similar(target)
     solution = _refined_solve!(factorization, target, residual)
+    factorization.output_estimates = nothing
+    factorization.field_input_bounds = nothing
     if _dense_error_estimate_enabled()     # `residual` is the final residual on every exit
         apply = isnothing(factorization.fallback) ? (r -> ComplexF64.(factorization.factor \ ComplexF32.(r))) :
                                                     (r -> factorization.fallback \ r)
         multiply = y -> factorization.matrix * y
-        factorization.estimated_error, factorization.estimate_direction_check =
-            _dense_error_estimate(apply, multiply, solution isa AbstractVector ? reshape(solution, :, 1) : solution,
-                                  residual isa AbstractVector ? reshape(residual, :, 1) : residual,
-                                  target isa AbstractVector ? reshape(target, :, 1) : target)
+        apply_adjoint = isnothing(factorization.fallback) ? (r -> ComplexF64.(factorization.factor' \ ComplexF32.(r))) :
+                                                            (r -> factorization.fallback' \ r)
+        x, b = _as_matrix(solution), _as_matrix(target)
+        rounding = _residual_rounding(b, _dense_abs_product(factorization.matrix, x), size(x, 1))
+        factorization.estimated_error, factorization.estimate_direction_check, factorization.error_bound =
+            _dense_error_estimate(apply, multiply, x, _as_matrix(residual), b; apply_adjoint, rounding)
     else
         factorization.estimated_error, factorization.estimate_direction_check = Float64[], Bool[]
+        factorization.error_bound = zeros(0, 0)
     end
     return solution
 end
@@ -339,7 +347,8 @@ end
 # shared with the CUDA coupled path.
 using ..BeatEngineCoupled: SplitDenseMatrix, adopt_square_storage, SplitRefinedLU, SplitGMRES, _dense_solver_mode, release_split_factor!, _dense_split_enabled,
     _dense_spill_target, _dense_gmres_ir_enabled, _split_mul!, _split_opnorm_inf, _split_materialize,
-    _split_precondition_double, _dense_error_estimate_enabled, _dense_error_estimate,
+    _split_precondition_double, _dense_error_estimate_enabled, _dense_error_estimate, _output_error_bound,
+    _residual_rounding,
     _dense_componentwise_enabled, _dense_componentwise_tolerance, _dense_abs_product, _acceptance_ratios,
     _componentwise_backward_errors, _refine_fallback!,
     _componentwise_note
@@ -361,10 +370,508 @@ For the refined solvers (and after a `SplitGMRES` fallback) also `dense_estimate
 an a-posteriori estimate of the solver's relative error for the assembled system (not discretization
 or assembly error) and a heuristic check of it, see `_dense_error_estimate`.
 `BLAB_DENSE_ERROR_ESTIMATE=0` skips it.
+
+After a coupled solve also, per transducer output and excitation (step 2 of docs/ROADMAP.md, display
+only): `dense_output_estimated_relative_error_diaphragm_velocity` / `..._voice_coil_current`
+(estimated complex relative solver error, `nothing` = unknown), `dense_output_recompute_float64_*`
+and `dense_output_recompute_float64` (hint: recompute in Float64), `dense_output_error_hint_threshold`.
+Solver error and output rounding only, not the Float32 assembly error; releases nothing.
 """
 function dense_solver_diagnostics(system)
     diagnostics = _dense_solver_diagnostics(system)
+    merge!(diagnostics, _output_estimate_diagnostics(system))
     hasproperty(system, :dense_lhs_adopted) && (diagnostics["dense_lhs_adopted"] = system.dense_lhs_adopted)
+    return diagnostics
+end
+
+# Step 2 of docs/ROADMAP.md (display only): estimated complex relative solver error per output and
+# excitation for the outputs read directly from the dense solution (diaphragm velocity and voice-coil
+# current per transducer), from the componentwise bound of `_dense_error_estimate`, and the hint to
+# recompute in Float64 where it exceeds `BLAB_OUTPUT_ERROR_HINT` (default 1e-3, provisional until the
+# owner sets the threshold) or is unknown. The estimate is a complex error, so a phase flip at equal
+# level counts fully. Solver error for the assembled system only: the Float32 assembly error (step 4)
+# is not included, so nothing is released automatically on this basis.
+
+function _output_error_hint_threshold()
+    raw = strip(get(ENV, "BLAB_OUTPUT_ERROR_HINT", ""))
+    isempty(raw) && return 1.0e-3
+    value = tryparse(Float64, raw)
+    (isnothing(value) || !(value > 0) || !isfinite(value)) &&
+        throw(ArgumentError("BLAB_OUTPUT_ERROR_HINT must be a positive finite number, got $(repr(raw))"))
+    return value
+end
+
+"""
+    output_recompute_hint(estimate, threshold) -> Bool
+
+`true` (recompute in Float64) when the estimated complex relative error exceeds `threshold` or is
+unknown (`NaN`) or infinite.
+"""
+output_recompute_hint(estimate::Real, threshold::Real) = !(isfinite(estimate) && estimate <= threshold)
+
+"""
+    output_error_estimates(factorization, dense_solution, ranges) -> Union{Nothing,Dict}
+
+Per output in `ranges` (`field => rows of the dense solution`) a `rows × excitations` matrix of the
+estimated complex relative solver error, or `nothing` when the solver gives no componentwise bound.
+"""
+function output_error_estimates(factorization, dense_solution::AbstractMatrix, ranges)
+    source = factorization isa SplitGMRES ? factorization.fallback : factorization
+    bound = (isnothing(source) || !hasproperty(source, :error_bound)) ? nothing : source.error_bound
+    # no componentwise bound (GMRES without fallback, estimate switched off): every output unknown
+    (isnothing(bound) || size(bound) != size(dense_solution)) &&
+        (bound = fill(NaN, size(dense_solution)))
+    return Dict(field => reduce(hcat, [_output_error_bound(view(bound, :, j), view(dense_solution, :, j), rows)
+                                       for j in axes(dense_solution, 2)]; init=zeros(length(rows), 0))
+                for (field, rows) in ranges)
+end
+
+# where the per-output estimates of the last solve live: the SplitGMRES fallback once it exists
+_output_estimate_store(factorization) =
+    factorization isa SplitGMRES && !isnothing(factorization.fallback) ? factorization.fallback : factorization
+
+function _store_output_estimates!(system, dense_solution)
+    store = _output_estimate_store(system.factorization)
+    (isnothing(store) || !hasproperty(store, :output_estimates)) && return nothing
+    ranges = (:diaphragm_velocity => system.mechanical_range, :voice_coil_current => system.electrical_range)
+    estimates = output_error_estimates(system.factorization, _as_matrix(dense_solution), ranges)
+    # the outputs are stored as Complex{scalar_type}: add the complex rounding √2 u of that storage
+    rounding = system.scalar_type === Float64 ? 0.0 : sqrt(2.0) * Float64(eps(system.scalar_type)) / 2
+    store.output_estimates = Dict{Symbol,Matrix{Float64}}(field => m .+ rounding for (field, m) in estimates)
+    return nothing
+end
+
+# Step 2 of docs/ROADMAP.md (display only), field points / polars: componentwise absolute bounds of
+# the solver error of the boundary data the field is evaluated from (`bem_pressure` per BEM node,
+# `bem_neumann` per BEM element, per excitation), propagated from the componentwise bound of
+# `_dense_error_estimate` through the same reconstruction as `solve_condensed_coupled_excitations`
+# and `_solution_from_parts`, plus the Float64 rounding of the flux reconstruction (bounded by its
+# summands, so cancellation is covered), the rounding of storing them as Complex{scalar_type} and of
+# the Complex{scalar_type} Neumann product. `field_output_error_estimates` carries them to the field.
+
+# |M| |x| with NaN in x kept local to the rows that use it (0 * NaN would spread it otherwise)
+_abs_product(matrix, x::AbstractVecOrMat) = abs.(matrix) * x
+
+function _field_input_bounds(system, dense_solution::AbstractMatrix, bound::AbstractMatrix,
+                             interface_flux::AbstractMatrix; flux_rhs=nothing)
+    T = system.scalar_type
+    u = T === Float64 ? 0.0 : Float64(eps(T)) / 2
+    mode = hasproperty(system, :interface_elimination) ? system.interface_elimination : :none
+    elimination = mode == :none ? nothing : system.interface_elimination_data
+    bem_bound = bound[system.bem_range, :]
+    velocity_bound = bound[system.mechanical_range, :]
+    flux_bound = if mode == :flux
+        gamma_bound = bem_bound[elimination.bem_of_gamma, :]
+        propagated = if hasproperty(elimination, :mass_operator)
+            result = zeros(Float64, elimination.mass_operator.count, size(bound, 2))
+            for (block, schur_block) in zip(elimination.mass_operator.blocks, elimination.schur_blocks)
+                @views result[block.dofs, :] .+= _abs_product(schur_block, gamma_bound[block.rows, :])
+            end
+            result
+        else
+            _abs_product(elimination.schur_solution, gamma_bound)
+        end
+        isempty(system.mechanical_range) || (propagated .+= _abs_product(elimination.motion_solution, velocity_bound))
+        # Float64 rounding of the reconstruction q = W p - h + V v itself (REVIEW-22-9abe18c P1): with
+        # cancellation it is not proportional to |q|, so bound it by the summands, √2 γ_w (|W||p| + |h| +
+        # |V||v|), w = entries per row of W and V + 2 additions. Without h it is unknown (NaN).
+        if isnothing(flux_rhs) || size(flux_rhs) != size(propagated)
+            propagated .= NaN
+        else
+            gamma_values = abs.(ComplexF64.(dense_solution[system.bem_range, :][elimination.bem_of_gamma, :]))
+            summands = abs.(ComplexF64.(flux_rhs))
+            widths = if hasproperty(elimination, :mass_operator)
+                width = 0
+                for (block, schur_block) in zip(elimination.mass_operator.blocks, elimination.schur_blocks)
+                    @views summands[block.dofs, :] .+= _abs_product(schur_block, gamma_values[block.rows, :])
+                    width = max(width, size(schur_block, 2))
+                end
+                width
+            else
+                summands .+= _abs_product(elimination.schur_solution, gamma_values)
+                size(elimination.schur_solution, 2)
+            end
+            if !isempty(system.mechanical_range)
+                summands .+= _abs_product(elimination.motion_solution,
+                                          abs.(ComplexF64.(dense_solution[system.mechanical_range, :])))
+                widths += size(elimination.motion_solution, 2)
+            end
+            w = widths + 2
+            u64 = eps(Float64) / 2
+            propagated .+= sqrt(2.0) * (w * u64 / (1 - w * u64)) .* summands
+        end
+        propagated
+    else
+        bound[system.flux_range, :]
+    end
+    # values as stored (Complex{T}) for the rounding terms
+    pressure = abs.(ComplexF64.(Complex{T}.(dense_solution[system.bem_range, :])))
+    velocity = abs.(ComplexF64.(Complex{T}.(dense_solution[system.mechanical_range, :])))
+    scale = abs(ComplexF64(neumann_scale(system.density, system.omega)))
+    flux_operator = system.interface_operators.bem_flux
+    motion_operator = system.transducer_operators.bem_normal_velocity
+    neumann_bound = _abs_product(flux_operator, flux_bound)
+    isempty(system.mechanical_range) || (neumann_bound .+= scale .* _abs_product(motion_operator, velocity_bound))
+    if u > 0
+        # Complex{T} product of the stored flux (`interface_flux`, already rounded to Complex{T}:
+        # √2 u |flux| each) and velocity: per row at most m + 2 roundings of size √2 u on
+        # |B| |flux| + |s| |N| |v| (m the most entries in a row); +1 for storing the flux
+        flux_rows = maximum(count(!iszero, row) for row in eachrow(flux_operator); init=0)
+        motion_rows = maximum(count(!iszero, row) for row in eachrow(motion_operator); init=0)
+        width = max(flux_rows, motion_rows) + 2
+        magnitude = _abs_product(flux_operator, abs.(ComplexF64.(interface_flux)))
+        isempty(system.mechanical_range) || (magnitude .+= scale .* _abs_product(motion_operator, velocity))
+        neumann_bound .+= sqrt(2.0) * u * (width + 1) .* magnitude
+    end
+    pressure_bound = bem_bound .+ sqrt(2.0) * u .* pressure
+    # `flux`: absolute bound of the interface flux before it is stored as Complex{T} (the storage
+    # rounding is added by `interface_velocity_error_estimates`, which sees the stored values)
+    return (pressure=pressure_bound, neumann=neumann_bound, flux=Matrix{Float64}(flux_bound))
+end
+
+function _store_field_input_bounds!(system, dense_solution, interface_flux; flux_rhs=nothing)
+    store = _output_estimate_store(system.factorization)
+    (isnothing(store) || !hasproperty(store, :field_input_bounds)) && return nothing
+    source = system.factorization isa SplitGMRES ? system.factorization.fallback : system.factorization
+    solution = _as_matrix(dense_solution)
+    bound = (isnothing(source) || !hasproperty(source, :error_bound)) ? nothing : source.error_bound
+    (isnothing(bound) || size(bound) != size(solution)) && (bound = fill(NaN, size(solution)))
+    store.field_input_bounds = _field_input_bounds(system, solution, bound, _as_matrix(interface_flux);
+                                                     flux_rhs=isnothing(flux_rhs) ? nothing : _as_matrix(flux_rhs))
+    return nothing
+end
+
+"""
+    field_output_error_estimates(system, eval_points, field_values, cache) -> Matrix{Float64}
+
+Estimated complex relative solver error of the exterior field (polars, field points) of the last
+coupled solve, `points × excitations` (step 2 of docs/ROADMAP.md, display only). `field_values[j]`
+are the field values of excitation `j` at `eval_points` (as returned by the field evaluation) and
+`cache` the CPU `FieldEvaluationCache` of the BEM mesh. The componentwise bounds of the boundary
+data (`_field_input_bounds`) are propagated by `galerkin_field_error_bound_cpu` and divided by
+`|field value|`; the complex rounding √2 u of storing the field as Complex{scalar_type} is added.
+`NaN` = unknown (no componentwise bound, e.g. GMRES without fallback); `Inf` where the field value
+is zero but its bound is not. Returns `nothing` when the factorization keeps no bounds.
+
+With `boundary_data` (per excitation `(pressure, neumann)`, the stored boundary data the field was
+evaluated from) the rounding of the field evaluation itself (field sum, kernel, evaluation points) is
+added: `|field value − Float64 field| + bound` from `galerkin_field_float64_reference_cpu` on the same
+data. Without it that term is not included. Not included either way: the Float32 assembly error and
+the rounding of the wavenumber and geometry to the scalar type (step 4).
+"""
+function field_output_error_estimates(system, eval_points, field_values, cache; boundary_data=nothing)
+    store = _output_estimate_store(system.factorization)
+    (isnothing(store) || !hasproperty(store, :field_input_bounds)) && return nothing
+    bounds = store.field_input_bounds
+    isnothing(bounds) && return nothing
+    excitations = size(bounds.pressure, 2)
+    length(field_values) == excitations ||
+        throw(ArgumentError("field_values has $(length(field_values)) excitations, the last solve $excitations"))
+    T = system.scalar_type
+    rounding = T === Float64 ? 0.0 : sqrt(2.0) * Float64(eps(T)) / 2
+    k = system.wavenumber
+    isnothing(boundary_data) || length(boundary_data) == excitations ||
+        throw(ArgumentError("boundary_data has $(length(boundary_data)) excitations, the last solve $excitations"))
+    estimates = fill(NaN, length(eval_points), excitations)
+    for j in 1:excitations
+        absolute = galerkin_field_error_bound_cpu(eval_points, view(bounds.pressure, :, j),
+                                                  view(bounds.neumann, :, j), k, cache)
+        isnothing(boundary_data) ||
+            (absolute .+= _field_evaluation_rounding(eval_points, field_values[j], boundary_data[j], k, cache))
+        _relative_field_estimates!(view(estimates, :, j), absolute, field_values[j], rounding, "field_values[$j]")
+    end
+    return estimates
+end
+
+# Rounding of the field evaluation from the stored boundary data `(pressure, neumann)`, measured
+# against the Float64 evaluation of the same data plus that evaluation's own rounding bound.
+function _field_evaluation_rounding(eval_points, values, data, k, cache)
+    pressure, neumann = data
+    length(values) == length(eval_points) ||
+        throw(ArgumentError("field values have $(length(values)) points, expected $(length(eval_points))"))
+    reference, reference_bound = galerkin_field_float64_reference_cpu(eval_points, pressure, neumann, k, cache)
+    return abs.(ComplexF64.(values) .- reference) .+ reference_bound
+end
+
+function _relative_field_estimates!(estimates, absolute, values, rounding, name)
+    length(values) == length(estimates) ||
+        throw(ArgumentError("$name has $(length(values)) points, expected $(length(estimates))"))
+    for i in eachindex(absolute)
+        b = absolute[i]; value = abs(ComplexF64(values[i]))
+        estimates[i] = isnan(b) ? NaN : iszero(b) ? rounding : iszero(value) ? Inf : b / value + rounding
+    end
+    return estimates
+end
+
+"""
+    synthesized_field_output_error_estimates(system, eval_points, field_value, cache, synthesis) -> Matrix{Float64}
+
+Like `field_output_error_estimates`, for an `exterior_pressure` output with excitation weights: the
+driver synthesizes the boundary data `Σ_j ŵ_j x̂_j` in Complex{scalar_type} before one field
+evaluation, so the estimate is a single column (`points × 1`). `synthesis` carries `weights` (the
+weights as used, Complex{scalar_type}), `requested_weights` (as requested, e.g. Float64 from the
+request; defaults to `weights`), and the stored per-excitation boundary data `pressure` and `neumann`
+(vectors of the `bem_pressure`/`bem_neumann` of each excitation). Componentwise, against the exact
+`Σ_j w_j x_j` with the requested weights:
+
+    Σ_j |ŵ_j| b_j + Σ_j |w_j − ŵ_j| (|x̂_j| + b_j) + √2 γ_{n+2} Σ_j |ŵ_j| |x̂_j|,   γ_m = m u / (1 − m u),
+
+with `b_j` the stored per-excitation input bounds, `n` the number of excitations and `u` the unit
+roundoff of the scalar type (the last term bounds the complex products and the running sum of the
+synthesis). Gradual underflow adds an absolute term: each real product of the synthesis can be off by
+up to half the smallest subnormal `η` of the scalar type, so every nonzero product `ŵ_j x̂_j` adds
+`2η(1 + γ_{n+2})` per component (`√2 η` for the two real products of each part, rounded up). A zero used weight contributes no bound term (its products are exactly zero). The
+result is propagated to the field and divided by `|field_value|` as in the per-excitation case;
+`NaN` = unknown, `Inf` = zero field value with a nonzero bound (e.g. exact cancellation of the
+weighted excitations). With `boundary_data = (pressure, neumann)`, the synthesized Complex{scalar_type}
+boundary data the field was evaluated from, the rounding of the field evaluation is added as in the
+per-excitation case. Not included, as there: the Float32 assembly error.
+"""
+function synthesized_field_output_error_estimates(system, eval_points, field_value, cache, synthesis;
+                                                  boundary_data=nothing)
+    store = _output_estimate_store(system.factorization)
+    (isnothing(store) || !hasproperty(store, :field_input_bounds)) && return nothing
+    bounds = store.field_input_bounds
+    isnothing(bounds) && return nothing
+    excitations = size(bounds.pressure, 2)
+    weights = synthesis.weights
+    requested = hasproperty(synthesis, :requested_weights) && !isnothing(synthesis.requested_weights) ?
+                synthesis.requested_weights : weights
+    for (name, list) in (("weights", weights), ("requested_weights", requested),
+                         ("pressure", synthesis.pressure), ("neumann", synthesis.neumann))
+        length(list) == excitations ||
+            throw(ArgumentError("synthesis.$name has $(length(list)) excitations, the last solve $excitations"))
+    end
+    T = system.scalar_type
+    u = Float64(eps(T)) / 2
+    pressure_bound = _synthesized_boundary_bound(T, weights, requested, synthesis.pressure, bounds.pressure, "pressure")
+    neumann_bound = _synthesized_boundary_bound(T, weights, requested, synthesis.neumann, bounds.neumann, "neumann")
+    absolute = galerkin_field_error_bound_cpu(eval_points, pressure_bound, neumann_bound, system.wavenumber, cache)
+    isnothing(boundary_data) ||
+        (absolute .+= _field_evaluation_rounding(eval_points, field_value, boundary_data, system.wavenumber, cache))
+    rounding = T === Float64 ? 0.0 : sqrt(2.0) * u
+    estimates = fill(NaN, length(eval_points), 1)
+    _relative_field_estimates!(view(estimates, :, 1), absolute, field_value, rounding, "field_value")
+    return estimates
+end
+
+# Componentwise bound of |Σ_j ŵ_j x̂_j (synthesized in Complex{T}) − Σ_j w_j x_j| for one boundary field, see
+# `synthesized_field_output_error_estimates`. `stored` are the per-excitation boundary vectors x̂_j,
+# `input_bounds` the matrix (component × excitation) of their stored bounds b_j.
+function _synthesized_boundary_bound(::Type{T}, weights, requested, stored, input_bounds, name) where {T}
+    excitations = size(input_bounds, 2)
+    u = Float64(eps(T)) / 2
+    m = excitations + 2
+    gamma = sqrt(2.0) * (m * u / (1 - m * u))
+    # gradual underflow of a nonzero complex product: two real products per part, each off by ≤ η/2
+    underflow = 2 * Float64(nextfloat(zero(T))) * (1 + gamma)
+    bound = zeros(Float64, size(input_bounds, 1)); magnitude = zeros(Float64, length(bound))
+    for j in 1:excitations
+        w = ComplexF64(weights[j]); deviation = abs(ComplexF64(requested[j]) - w)
+        x = abs.(ComplexF64.(stored[j]))
+        length(x) == length(bound) ||
+            throw(ArgumentError("synthesis $name data of excitation $j do not match the stored bounds"))
+        b = view(input_bounds, :, j)
+        if !iszero(w)
+            bound .+= abs(w) .* b
+            magnitude .+= abs(w) .* x
+            bound .+= underflow .* .!iszero.(x)
+        end
+        iszero(deviation) || (bound .+= deviation .* (x .+ b))
+    end
+    bound .+= gamma .* magnitude
+    return bound
+end
+
+"""
+    field_output_error_diagnostics!(diagnostics, system, output_id, eval_points, field_values) -> diagnostics
+
+Driver wiring of `field_output_error_estimates` for one per-excitation field output (`exterior_pressure`
+without excitation weights; step 2 of docs/ROADMAP.md, display only). Adds, keyed by `output_id`:
+`dense_output_estimated_relative_error_field[output_id]` (`excitation → point`, `null` = unknown) and
+`dense_output_recompute_float64_field[output_id]`, and ORs the hints into
+`dense_output_recompute_float64_fields` and `dense_output_recompute_float64`. Without a CPU field cache
+(Metal) the output is listed in `dense_output_field_error_not_computed` with the reason instead, and no
+hint is raised for it. Nothing is added when the last solve keeps no bounds (estimate store missing).
+
+With `synthesis` (an output with excitation weights, see `synthesized_field_output_error_estimates`),
+`field_values` holds the one synthesized field, the reported list has a single row, and the output
+id is also recorded in `dense_output_field_error_synthesized` with the number of excitations.
+
+`boundary_data` is passed on to the estimate (per excitation `(pressure, neumann)`, or one pair for a
+synthesized output); `dense_output_field_evaluation_rounding_included[output_id]` records whether the
+rounding of the field evaluation is part of the estimate.
+"""
+function field_output_error_diagnostics!(diagnostics::AbstractDict, system, output_id::AbstractString,
+                                         eval_points, field_values; synthesis=nothing, boundary_data=nothing)
+    factorization = hasproperty(system, :factorization) ? system.factorization : nothing
+    store = isnothing(factorization) ? nothing : _output_estimate_store(factorization)
+    (isnothing(store) || !hasproperty(store, :field_input_bounds) || isnothing(store.field_input_bounds)) &&
+        return diagnostics
+    cache = hasproperty(system, :field_cache) ? system.field_cache : nothing
+    if !(cache isa BeatEngineCore.FieldEvaluationCache)
+        reasons = get!(diagnostics, "dense_output_field_error_not_computed", Dict{String,Any}())
+        reasons[String(output_id)] = "no CPU field cache for this backend ($(nameof(typeof(cache))))"
+        return diagnostics
+    end
+    estimates = if isnothing(synthesis)
+        field_output_error_estimates(system, eval_points, field_values, cache; boundary_data)
+    else
+        length(field_values) == 1 ||
+            throw(ArgumentError("a synthesized output has one field, got $(length(field_values))"))
+        synthesized_field_output_error_estimates(system, eval_points, only(field_values), cache, synthesis;
+                                                 boundary_data)
+    end
+    isnothing(estimates) && return diagnostics
+    get!(diagnostics, "dense_output_field_evaluation_rounding_included", Dict{String,Any}())[String(output_id)] =
+        !isnothing(boundary_data)
+    isnothing(synthesis) || (get!(diagnostics, "dense_output_field_error_synthesized", Dict{String,Any}())[String(output_id)] =
+        length(synthesis.weights))
+    threshold = _output_error_hint_threshold()
+    hints = [[output_recompute_hint(v, threshold) for v in view(estimates, :, j)] for j in axes(estimates, 2)]
+    get!(diagnostics, "dense_output_estimated_relative_error_field", Dict{String,Any}())[String(output_id)] =
+        [Union{Nothing,Float64}[isnan(v) ? nothing : (isinf(v) ? floatmax(Float64) : v) for v in view(estimates, :, j)]
+         for j in axes(estimates, 2)]
+    get!(diagnostics, "dense_output_recompute_float64_field", Dict{String,Any}())[String(output_id)] = hints
+    diagnostics["dense_output_error_hint_threshold"] = threshold
+    hinted = any(any, hints)
+    diagnostics["dense_output_recompute_float64_fields"] = get(diagnostics, "dense_output_recompute_float64_fields", false) || hinted
+    diagnostics["dense_output_recompute_float64"] = get(diagnostics, "dense_output_recompute_float64", false) || hinted
+    return diagnostics
+end
+
+function _output_estimate_diagnostics(system)
+    factorization = hasproperty(system, :factorization) ? system.factorization : nothing
+    store = isnothing(factorization) ? nothing : _output_estimate_store(factorization)
+    (isnothing(store) || !hasproperty(store, :output_estimates)) && return Dict{String,Any}()
+    estimates = store.output_estimates
+    isnothing(estimates) && return Dict{String,Any}()
+    threshold = _output_error_hint_threshold()
+    as_json(m) = [Union{Nothing,Float64}[isnan(v) ? nothing : (isinf(v) ? floatmax(Float64) : v) for v in view(m, :, j)]
+                  for j in axes(m, 2)]
+    diagnostics = Dict{String,Any}("dense_output_error_hint_threshold" => threshold)
+    for (field, m) in estimates
+        diagnostics["dense_output_estimated_relative_error_$(field)"] = as_json(m)
+        diagnostics["dense_output_recompute_float64_$(field)"] =
+            [[output_recompute_hint(v, threshold) for v in view(m, :, j)] for j in axes(m, 2)]
+    end
+    diagnostics["dense_output_recompute_float64"] =
+        any(output_recompute_hint(v, threshold) for m in values(estimates) for v in m)
+    return diagnostics
+end
+
+"""
+    interface_velocity_error_estimates(system, interface_flux, ranges, weights, scale, reference_scale)
+        -> Union{Nothing,Matrix{Float64}}
+
+Estimated complex relative solver error of the area-averaged interface normal velocity
+`v_i = Σ_{r ∈ ranges[i]} w_r q̂_r / ŝ` (`interface_average_normal_velocity`) of the last coupled solve,
+`interfaces × excitations` (step 2 of docs/ROADMAP.md, display only). `interface_flux[j]` is the stored
+Complex{scalar_type} flux of excitation `j` as the driver averages it, `weights[i]` the weights of
+interface `i`, `scale` the Neumann scale as used (`neumann_scale` in the scalar type) and
+`reference_scale` the same scale in Float64 from the Float64 density and the requested frequency (so the
+rounding of the scale is included). With `b_r` the stored
+absolute flux bound (`_field_input_bounds`, before storage), `u` the unit roundoff of the scalar type and
+`η` the smallest positive subnormal of the scalar type (gradual underflow of the storage, also of fluxes
+stored as zero), `γ_m = m u₆₄ / (1 − m u₆₄)` in Float64, the error of the computed sum `Σ̂_i` against the exact
+`Σ_r w_r q_r` is bounded by
+
+    A_i = Σ_r |w_r| (b_r + c |q̂_r| + d) + |Σ̂_i − S_i| + √2 γ_n Σ_r |w_r| |q̂_r|,
+    c = √2 u / (1 − √2 u),   d = (η / √2) / (1 − √2 u),
+
+where `S_i` is the same sum of the stored values in Float64 (the products of scalar-type values are exact
+in Float64, so only its running sum rounds, `n = |ranges[i]|`). The rounding of the averaging is thus
+measured a posteriori rather than bounded by the worst case `γ_n` of the scalar type, which would be
+far larger on interfaces with many entries. With `D_i = Σ̂_i / ŝ` in Float64 and `v̂_i` the average as stored (Complex{scalar_type}), the bound of
+`|v̂_i − v_i|` is
+
+    |v̂_i − D_i| + √2 γ_4 |D_i| + A_i / |ŝ| + (Σ_r |w_r| |q̂_r| + A_i) |ŝ − s| / (|ŝ| |s|),
+
+divided by `|v̂_i|`; `NaN` = unknown (no componentwise bound, or a flux bound that is unknown, e.g. GMRES
+without fallback), `Inf` where `v̂_i` is zero but its bound is not. Not included: the rounding of the
+weights (interface areas) to the scalar type, which belongs to the geometry and assembly error of step 4.
+Returns `nothing` when the factorization keeps no bounds.
+"""
+function interface_velocity_error_estimates(system, interface_flux, ranges, weights, scale, reference_scale)
+    store = _output_estimate_store(system.factorization)
+    (isnothing(store) || !hasproperty(store, :field_input_bounds)) && return nothing
+    bounds = store.field_input_bounds
+    (isnothing(bounds) || !hasproperty(bounds, :flux)) && return nothing
+    excitations = size(bounds.flux, 2)
+    length(interface_flux) == excitations ||
+        throw(ArgumentError("interface_flux has $(length(interface_flux)) excitations, the last solve $excitations"))
+    length(weights) == length(ranges) ||
+        throw(ArgumentError("$(length(weights)) weight vectors for $(length(ranges)) interfaces"))
+    T = system.scalar_type
+    u = Float64(eps(T)) / 2
+    u64 = eps(Float64) / 2
+    gamma64(m) = m * u64 / (1 - m * u64)
+    store_rounding = sqrt(2.0) * u / (1 - sqrt(2.0) * u)
+    # gradual underflow of the storage: each real part rounds by ≤ max(u |x|, η/2), so a complex entry
+    # by ≤ (u |q̂| + η/√2) / (1 − u); also for entries stored as zero
+    store_underflow = Float64(nextfloat(zero(T))) / sqrt(2.0) / (1 - sqrt(2.0) * u)
+    s_hat = ComplexF64(scale); s = ComplexF64(reference_scale)
+    (iszero(s_hat) || iszero(s)) && throw(ArgumentError("the Neumann scale is zero"))
+    scale_term = abs(s_hat - s) / (abs(s_hat) * abs(s))
+    estimates = fill(NaN, length(ranges), excitations)
+    for j in 1:excitations
+        flux = interface_flux[j]
+        length(flux) == size(bounds.flux, 1) ||
+            throw(ArgumentError("interface_flux[$j] has $(length(flux)) entries, the stored bound $(size(bounds.flux, 1))"))
+        for (i, (range, w)) in enumerate(zip(ranges, weights))
+            length(w) == length(range) ||
+                throw(ArgumentError("interface $i: $(length(w)) weights for $(length(range)) flux entries"))
+            b = view(bounds.flux, range, j)
+            any(isnan, b) && continue                                    # unknown
+            stored = view(flux, range)
+            q = abs.(ComplexF64.(stored)); aw = abs.(Float64.(w))
+            magnitude = sum(aw .* q; init=0.0)
+            # as the driver computes it (interface_average_normal_velocity), in the stored types
+            isempty(range) && continue                                   # no entries: unknown
+            computed_sum = sum(w .* stored)
+            computed = computed_sum / scale
+            # the driver stores the average as Complex{T} (`rows`); exact when it already is one
+            output = Complex{T}(computed)
+            reference_sum = sum(ComplexF64.(w) .* ComplexF64.(stored); init=zero(ComplexF64))
+            absolute_sum = sum(aw .* (b .+ store_rounding .* q .+ store_underflow); init=0.0) +
+                           abs(ComplexF64(computed_sum) - reference_sum) + sqrt(2.0) * gamma64(length(range)) * magnitude
+            quotient = ComplexF64(computed_sum) / s_hat
+            value = abs(ComplexF64(output))
+            absolute = abs(ComplexF64(output) - quotient) + sqrt(2.0) * gamma64(4) * abs(quotient) +
+                       absolute_sum / abs(s_hat) + (magnitude + absolute_sum) * scale_term
+            estimates[i, j] = iszero(absolute) ? 0.0 : iszero(value) ? Inf : absolute / value
+        end
+    end
+    return estimates
+end
+
+"""
+    interface_velocity_error_diagnostics!(diagnostics, system, output_id, interface_flux, ranges, weights,
+                                          scale, reference_scale) -> diagnostics
+
+Driver wiring of `interface_velocity_error_estimates` for one `interface_average_normal_velocity` output
+(display only). Adds, keyed by `output_id`: `dense_output_estimated_relative_error_interface_velocity`
+(`excitation → interface`, `null` = unknown) and `dense_output_recompute_float64_interface_velocity`, and
+ORs the hints into `dense_output_recompute_float64_interface_velocities` and
+`dense_output_recompute_float64`. Nothing is added when the last solve keeps no bounds.
+"""
+function interface_velocity_error_diagnostics!(diagnostics::AbstractDict, system, output_id::AbstractString,
+                                               interface_flux, ranges, weights, scale, reference_scale)
+    factorization = hasproperty(system, :factorization) ? system.factorization : nothing
+    isnothing(factorization) && return diagnostics
+    estimates = interface_velocity_error_estimates(system, interface_flux, ranges, weights, scale, reference_scale)
+    isnothing(estimates) && return diagnostics
+    threshold = _output_error_hint_threshold()
+    hints = [[output_recompute_hint(v, threshold) for v in view(estimates, :, j)] for j in axes(estimates, 2)]
+    get!(diagnostics, "dense_output_estimated_relative_error_interface_velocity", Dict{String,Any}())[String(output_id)] =
+        [Union{Nothing,Float64}[isnan(v) ? nothing : (isinf(v) ? floatmax(Float64) : v) for v in view(estimates, :, j)]
+         for j in axes(estimates, 2)]
+    get!(diagnostics, "dense_output_recompute_float64_interface_velocity", Dict{String,Any}())[String(output_id)] = hints
+    diagnostics["dense_output_error_hint_threshold"] = threshold
+    hinted = any(any, hints)
+    diagnostics["dense_output_recompute_float64_interface_velocities"] =
+        get(diagnostics, "dense_output_recompute_float64_interface_velocities", false) || hinted
+    diagnostics["dense_output_recompute_float64"] = get(diagnostics, "dense_output_recompute_float64", false) || hinted
     return diagnostics
 end
 
@@ -3009,6 +3516,7 @@ function solve_condensed_coupled_excitations(system, excitations; reconstruct_in
             Complex{system.dense_scalar_type}.(transpose(system.condensation.force_solution) * interior_rhs)
     end
     dense_solution = _split_timed!(() -> system.factorization \ rhs, solve_split, :dense_solve)
+    _store_output_estimates!(system, dense_solution)
     solution = Complex{T}.(dense_solution)
     flux_reconstruction_started = time_ns()
     retained_pressure, interface_flux = if elimination_mode == :none
@@ -3032,6 +3540,8 @@ function solve_condensed_coupled_excitations(system, excitations; reconstruct_in
         Complex{T}.(bem_gamma), Complex{T}.(flux)
     end
     solve_split[:flux_reconstruction] = (time_ns() - flux_reconstruction_started) / 1.0e9
+    _store_field_input_bounds!(system, dense_solution, interface_flux;
+                               flux_rhs=elimination_mode == :flux ? flux_rhs_solution : nothing)
     reconstruction_started = time_ns()
     fem_pressure, fem_interior_residual = if reconstruct_interior
         _backward_schur(

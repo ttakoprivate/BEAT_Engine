@@ -3336,6 +3336,9 @@ function solve_request_impl(request; event_mode=false)
                 for index in eachindex(interfaces)
             ]
             field_s = 0.0
+            # step 2 of docs/ROADMAP.md (display only): per-point solver-error estimates of field outputs
+            field_error_diagnostics = Dict{String,Any}()
+            field_error_s = 0.0
             quantities = Dict{String,Any}[]
             rom_options = get(solver_options, "speaker_rom", Dict{String,Any}())
             rom_matrices = if rom_requested
@@ -3425,6 +3428,16 @@ function solve_request_impl(request; event_mode=false)
                         ),
                     )
                 elseif quantity == "interface_average_normal_velocity"
+                    if use_condensed_solver
+                        # step 2 of docs/ROADMAP.md (display only), timed outside field_s
+                        interface_error_started = time_ns()
+                        BeatEngineCoupledCondensed.interface_velocity_error_diagnostics!(field_error_diagnostics,
+                            coupled_system, String(output["id"]), [solution.interface_flux for solution in solutions],
+                            combined_interfaces.ranges, interface_averages.weights,
+                            BeatEngineCoupled.neumann_scale(density, FloatType(2pi) * frequency_hz),
+                            BeatEngineCoupled.neumann_scale(Float64(reference_density), 2pi * Float64(frequency_value)))
+                        field_error_s += (time_ns() - interface_error_started) / 1.0e9
+                    end
                     push!(quantities, quantity_wire(
                         output,
                         rows([interface_average_normal_velocity(
@@ -3558,12 +3571,22 @@ function solve_request_impl(request; event_mode=false)
                     raw_weights = isempty(raw_weight_sweep) ?
                                   get(options, "excitation_weights", Any[]) :
                                   raw_weight_sweep[frequency_index]
+                    # Field values for the error estimate; it runs after the field interval
+                    # closes so its time is only in dense_output_field_error_s, not in field_s.
+                    error_estimate_pressures = nothing
+                    error_estimate_synthesis = nothing
+                    error_estimate_boundary = nothing
                     if isempty(raw_weights)
                         pressures = [exterior_output_fields!(fields, String(output["id"]),
                             field_points_by_output, bem_mesh, solution.bem_pressure, solution.bem_neumann,
                             coupled_system.wavenumber, coupled_system.field_cache, bem_backend,
                             field_batch, metal_field_batch; metal_field_points=metal_field_points)
                             for (fields, solution) in zip(fields_by_excitation, solutions)]
+                        if use_condensed_solver
+                            error_estimate_pressures = pressures
+                            error_estimate_boundary = [(solution.bem_pressure, solution.bem_neumann)
+                                                       for solution in solutions]
+                        end
                         push!(
                             quantities,
                             quantity_wire(
@@ -3631,6 +3654,20 @@ function solve_request_impl(request; event_mode=false)
                                 coupled_system.field_cache,
                             )
                         end
+                        if use_condensed_solver
+                            error_estimate_pressures = [pressure]
+                            error_estimate_boundary = (combined_pressure, combined_neumann)
+                            error_estimate_synthesis = (
+                                weights=weights,
+                                requested_weights=ComplexF64[
+                                    ComplexF64(Float64(get(raw_weight, "real", 0.0)),
+                                               Float64(get(raw_weight, "imag", 0.0)))
+                                    for raw_weight in raw_weights
+                                ],
+                                pressure=[solution.bem_pressure for solution in solutions],
+                                neumann=[solution.bem_neumann for solution in solutions],
+                            )
+                        end
                         push!(
                             quantities,
                             quantity_wire(
@@ -3645,6 +3682,13 @@ function solve_request_impl(request; event_mode=false)
                         )
                     end
                     field_s += (time_ns() - field_started) / 1.0e9
+                    if !isnothing(error_estimate_pressures)
+                        field_error_started = time_ns()
+                        BeatEngineCoupledCondensed.field_output_error_diagnostics!(field_error_diagnostics,
+                            coupled_system, String(output["id"]), points, error_estimate_pressures;
+                            synthesis=error_estimate_synthesis, boundary_data=error_estimate_boundary)
+                        field_error_s += (time_ns() - field_error_started) / 1.0e9
+                    end
                 elseif quantity in SPEAKER_ROM_QUANTITIES
                     axes = if quantity == "speaker_rom_k"
                         ["parity_sector", "reduced_row", "reduced_column"]
@@ -3894,6 +3938,16 @@ function solve_request_impl(request; event_mode=false)
             end
             isnothing(rank_experiment) ||
                 (diagnostics["speaker_rom_rank_experiment"] = rank_experiment)
+            if !isempty(field_error_diagnostics)
+                for (key, value) in field_error_diagnostics
+                    key == "dense_output_recompute_float64" && continue
+                    diagnostics[key] = value
+                end
+                diagnostics["dense_output_recompute_float64"] = get(diagnostics, "dense_output_recompute_float64", false) ||
+                    get(field_error_diagnostics, "dense_output_recompute_float64_fields", false) ||
+                    get(field_error_diagnostics, "dense_output_recompute_float64_interface_velocities", false)
+                diagnostics["dense_output_field_error_s"] = field_error_s
+            end
             result = Dict(
                 "schema_version" => 2,
                 "freq_hz" => frequency_hz,
