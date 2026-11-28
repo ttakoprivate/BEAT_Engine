@@ -21,22 +21,22 @@
     22
   ],
   "lease": {
-    "holder": "work28-14-mx0ezddu",
-    "acquired_at": "2026-11-28T12:56:32.130Z",
-    "expires_at": "2026-11-28T14:26:32.130Z",
+    "holder": null,
+    "acquired_at": null,
+    "expires_at": null,
     "fencing_token": 39
   },
   "last_completed_run": {
-    "id": "work28-13-mx0d5h0y",
-    "started_at": "2026-11-28T12:05:17.554Z",
-    "completed_at": "2026-11-28T12:14:00.694Z",
-    "status": "calibration_protocol_field_path_mismatch_reproduced",
+    "id": "work28-14-mx0ezddu",
+    "started_at": "2026-11-28T12:56:32.130Z",
+    "completed_at": "2026-11-28T13:05:53.291Z",
+    "status": "calibration_protocol_field_path_fix_verified",
     "source_commit": "b34abee291207a13876068c99948d8ca386756fa",
     "checked_heads": {
       "9": "3d639cef853f6c60caa36fda4a8b39f28baec3f7",
       "14": "b2b756da7076cab3b32a63c822ec91af36a7e6ce",
       "19": "7afbaf4b3d88b1f15e39c12ab9a2a47473b336c9",
-      "22": "89238e40f0f0f5787eab1929c442d0b2078c37f7",
+      "22": "df4d4a1a3ab20cc65519d6bf976e536edfe2b1f0",
       "23": "a6967725cb95f270c494611c0342019e2dad4d91"
     },
     "source_changes": false,
@@ -44,19 +44,19 @@
     "actions": [
       {
         "pr": 22,
-        "commit": "89238e40f0f0f5787eab1929c442d0b2078c37f7",
-        "review_id": 6097722062,
-        "url": "https://github.com/ttakoprivate/BEAT_Engine/pull/22#pullrequestreview-6097722062",
-        "review_state": "REQUEST_CHANGES"
+        "commit": "df4d4a1a3ab20cc65519d6bf976e536edfe2b1f0",
+        "review_id": 6097911865,
+        "url": "https://github.com/ttakoprivate/BEAT_Engine/pull/22#pullrequestreview-6097911865",
+        "review_state": "COMMENT"
       }
     ],
-    "evidence": "Fresh T1205clone/new officialJulia1.12.6+officialSHA256 bbabf3bef19421a9dbd24a767d807606ab85e444323b5a1c73ffe293fa3d079a/newdepot. Manifest1.12.6/CI1.12 verified. Pkg.instantiate exit0. review_2813.jl --threads4 --startup-file=no project julia_local OPENBLAS1 exit0 includes unmodified new qualification script emptyARGS standard12freq2exc2splits:768records,nozerorefs;reportedcal factors7.08/1.36/6.65/1.43 andholdbad4/0/4/0 reproduced. 45ownassertions29protocol+16fieldpath,0skip/Broken. At300Hz actualF32fieldmaxrel2.29589508e-5 both exc vs F64reevaluated1.73001162e-5;undercoverage10vs13each. At1000Hz actual3.17508652e-6 vsreevaluated1.45915342e-6,undercoverage4vs0each. Candidatepathabsolute differences300Hz5.36237440e-7/1.07247488e-6Pa,1000Hz6.14546453e-7/1.22909291e-6Pa. P2script113-119 stripsfieldgeometry/wavenumber/evaluationrounding;use actualfields orlabelseparate. Cal/holdsplitcorrect,176cancellations/no sampledresonance. Largerfixedfactors11/2/11/2 coverthisfiniteentiresweep,notgeneralizationproof;wording universalno fixedfactorunsupported. false-release predicateisboundundercoverage,nothresholdapproval;zero-refunitsmissingstaticonly. Perexcmaxrecordedreview. SameengineF64refnotindependentphysical. No engine/baselinechanges;clean tree,diffcheckexit0. No fullreferencegate/existingalgebraicJSONsuite/Python/GPU/h343/performance. Freshhead/replies/lease before review,postedreviewverified.",
+    "evidence": "Fresh T1257clone/new officialJulia1.12.6 officialSHA256 bbabf3bef19421a9dbd24a767d807606ab85e444323b5a1c73ffe293fa3d079a/newdepot. Manifest1.12.6/CI1.12 verified. Pkg.instantiate exit0. New repository qualification regression159+7=166pass; ownreview_2814.jl includesunmodifiedstandardscript emptyARGS then54assertions:220pass0skip/Broken, both Julia commands --threads4 --startup-file=no projectjulia_local OPENBLAS1 exit0. Full12freq2exc2splits768primary+624separatereevaluationrecords,nozerorefs. P2script actualFloat32fieldsnowrecorded125-135,old300/1000Hzcases2.29589508e-5/3.17508652e-6and10/4undercoveredpoints perexc verified. Fieldmaxcomplexrelperexc3.25754596909e-5/3.25754597159e-5,reeval1.73001162322e-5/1.73001162292e-5. Fieldunder276/624calibrated9.93hold8/312;membrane/current/interfacehold4/0/4. Threshold1e-6 rawwrong24interface120field,1e-5 raw8interface0field;calibratedhold0atboth;allerrorbelow1e-4. Equality/NaN/Inf/zeroestimatecontrols passed.176cancellationsperfieldoutput,nosampledresonance. Zero-refunitformatstaticonly,UNITkeysregtested. SameengineF64refnotindependentphysical,nocausalisolation. Clean tree,diffcheckexit0;no source/baselinechanges. No fullreferencegate/existingalgebraicJSONsuite/Python/GPU/h343/performance/overallqualification. Freshhead/replies/lease before review,postedreviewverified.",
     "pending": [
       "PR14 N1/N2b2b756d awaits independent follow-up;row-quadrature/adjoint review and h343 qualification open.",
       "PR19 numerical/export findings and owner split/merge decision open;three ROM fixes verified.",
       "Issue12 VACS sample/format answers pending;PR17 merged;PR9 roadmap update planned.",
       "PR23 a696772 own null-hook P2 verified fixed6092007765. Source-worker auto-loading, external labels, maxiter250, per-frequency reset and A-BLASfailure verified 178tests. Cfinally source-only; bundle/largerH/referencegate/GPU/h343 qualifications remain. No overallapproval.",
-      "PR22 89238e4 new calibration script P2 fieldcandidate mismatch reproduced6097722062;awaitauthorfix. Calibratedfactorsfailholdout,notallfixedfactorsimpossible; bound-undercoverage !=thresholdfalseapproval. Prior4a664a6 storage/projection/synthesis/timingfixes verifiedinpreviousrun;nooverallqualification."
+      "PR22 df4d4a1 calibration fieldpath P2 fix verified6097911865;220tests+fullsweep. ActualF32fields andseparatereevaluation;undercoveragevswrongthresholddecisionscorrected;calibratedfactorsstillundercoverholdout. Priorstorage/projection/synthesis/timingfixes verifiedpreviousruns. Awaitnewwork/assembly/hardwarequalification;nooverallapproval."
     ],
     "continuation": "Continue new or independently actionable work only. Do not repeat unchanged findings, acknowledgments, owner questions. Normal external review/data/hardware waits do not pause routine."
   },
