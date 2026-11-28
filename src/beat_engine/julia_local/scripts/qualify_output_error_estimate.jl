@@ -9,12 +9,17 @@
 #
 #   * calibration set = every other sweep frequency (1st, 3rd, ...), holdout = the rest (interleaved, so
 #     both span the band); the factor k = max(true / estimate) over the calibration entries (at least 1);
-#   * "false release" = an entry whose (factored) estimate is below its true error; reported for k = 1 and
-#     for the calibrated k on the holdout;
+#   * "under-coverage" = an entry whose (factored) estimate is below its true error, i.e. the estimate fails
+#     as an upper bound; reported for k = 1 and for the calibrated k on the holdout. This is NOT a wrong
+#     accept/reject decision: those are counted separately for fixed accuracy thresholds (THRESHOLDS), where
+#     a wrong release is (factored) estimate < threshold <= true error;
+#   * the pressure candidate is the Float32 field evaluation that `solve` hands to the estimate (Float32
+#     geometry, wavenumber and cache); a Float64 re-evaluation of the same Float32 boundary data is kept as a
+#     separately named diagnostic (field_pressure_f64_reeval) and is not used for the calibration verdict;
 #   * entries at resonances (sweep frequencies where |diaphragm velocity| of the Float64 build is a local
 #     maximum) and at cancellations (field points more than 20 dB below the largest |p| on the arc for that
 #     frequency and excitation) are reported separately;
-#   * exact-zero references are reported as absolute errors with unit, never as relative ones.
+#   * exact-zero references are reported as absolute errors with their unit, never as relative ones.
 #
 # Nothing here changes a solution or a baseline. Not a qualification of h343 (that needs the Mac) and not
 # a performance measurement.
@@ -35,6 +40,9 @@ const CANCELLATION_DB = 20.0
 const SPLITS = ("auto", "0")
 const COMMON = ("BLAB_COUPLED_TRANSDUCER_CONDENSATION" => "1", "BLAB_COUPLED_INTERFACE_FLUX_ELIMINATION" => "1")
 const DENSITY = 1.21
+const THRESHOLDS = (1e-6, 1e-5, 1e-4)
+const UNIT = Dict(:diaphragm_velocity => "m/s", :voice_coil_current => "A", :interface_velocity => "m/s",
+                  :field_pressure => "Pa", :field_pressure_f64_reeval => "Pa")
 frequencies = isempty(ARGS) ? DEFAULT_SWEEP : sort(parse.(Float64, ARGS))
 
 function setup(::Type{T}) where {T}
@@ -71,7 +79,7 @@ function solve(s, ::Type{T}, f, env...; estimates=false) where {T}
         interface = OE.interface_velocity_error_estimates(system, fluxes, s.ranges, s.weights, scale,
                                                           neumann_scale(DENSITY, 2pi * f))
         velocity = [interface_average_normal_velocity(q, s.ranges, s.weights, scale) for q in fluxes]
-        return (; solutions, diagnostics, field, interface, velocity, wavenumber=system.wavenumber,
+        return (; solutions, diagnostics, field, fields, interface, velocity, wavenumber=system.wavenumber,
                 rule=system.regular_quadrature_order)
     finally
         release_condensed_coupled_system!(system)
@@ -81,6 +89,10 @@ end
 # one record per entry: output, frequency, excitation, index, estimate, true error (relative, or absolute
 # with unit when the reference is exactly zero), magnitude of the reference
 records = NamedTuple[]
+# the Float32 pressure candidates actually passed to the estimate, keyed by (f, split, excitation); kept so
+# that tests/qualify_output_error_estimate_tests.jl can check that exactly these land in the comparison
+candidate_fields = Dict{Tuple{Float64,String,Int},Vector}()
+reference_fields = Dict{Tuple{Float64,String,Int},Vector{ComplexF64}}()
 function record!(output, f, split, exc, i, estimate, candidate, reference)
     c = ComplexF64(candidate); r = ComplexF64(reference)
     zero_ref = iszero(r)
@@ -110,13 +122,17 @@ for f in frequencies
             for i in eachindex(v64)
                 record!(:interface_velocity, f, split, k, i, c.interface[i, k], c.velocity[k][i], v64[i])
             end
-            # both fields in Float64 from the stored boundary data of each solve
-            pc = evaluate_galerkin_field_cpu(FIELD_POINTS, s64.bem, ComplexF64.(c.solutions[k].bem_pressure),
-                                             ComplexF64.(c.solutions[k].bem_neumann), k64, cache64)
+            # candidate: the Float32 evaluation handed to the estimate; reference: fully Float64 build
+            candidate_fields[(f, split, k)] = c.fields[k]
             pr = evaluate_galerkin_field_cpu(FIELD_POINTS, s64.bem, full64[k].bem_pressure, full64[k].bem_neumann,
                                              k64, cache64)
+            reference_fields[(f, split, k)] = pr
+            # diagnostic only: the same Float32 boundary data re-evaluated in Float64 (removes field rounding)
+            pc = evaluate_galerkin_field_cpu(FIELD_POINTS, s64.bem, ComplexF64.(c.solutions[k].bem_pressure),
+                                             ComplexF64.(c.solutions[k].bem_neumann), k64, cache64)
             for i in eachindex(FIELD_POINTS)
-                record!(:field_pressure, f, split, k, i, c.field[i, k], pc[i], pr[i])
+                record!(:field_pressure, f, split, k, i, c.field[i, k], c.fields[k][i], pr[i])
+                record!(:field_pressure_f64_reeval, f, split, k, i, c.field[i, k], pc[i], pr[i])
             end
         end
     end
@@ -131,29 +147,38 @@ for r in records
     r.output == :field_pressure || continue
     key = (r.f, r.split, r.exc); arc_max[key] = max(get(arc_max, key, 0.0), r.magnitude)
 end
-cancellation(r) = r.output == :field_pressure && r.magnitude < arc_max[(r.f, r.split, r.exc)] * 10^(-CANCELLATION_DB / 20)
+cancellation(r) = r.output in (:field_pressure, :field_pressure_f64_reeval) && r.magnitude < arc_max[(r.f, r.split, r.exc)] * 10^(-CANCELLATION_DB / 20)
 calibration = Set(frequencies[1:2:end])
 relative_entries(set) = [r for r in set if !r.zero_ref]
 ratio(r) = isnan(r.estimate) ? 0.0 : r.err / r.estimate     # NaN estimate = unknown = hint, never a release
-released_wrongly(r, k) = !isnan(r.estimate) && (iszero(r.estimate) ? r.err > 0 : k * r.estimate < r.err)
+# estimate (times k) fails as an upper bound of the true error
+under_covered(r, k) = !isnan(r.estimate) && (iszero(r.estimate) ? r.err > 0 : k * r.estimate < r.err)
+# wrong accept decision at accuracy threshold t: (factored) estimate says "below t", true error is not
+wrong_release(r, k, t) = !isnan(r.estimate) && k * r.estimate < t && r.err >= t
 
 println("\nresonance frequencies of this sweep (local maxima of |diaphragm velocity|): ", sort(collect(resonances)))
 println("calibration frequencies: ", sort(collect(calibration)))
-outputs = (:diaphragm_velocity, :voice_coil_current, :interface_velocity, :field_pressure)
+outputs = (:diaphragm_velocity, :voice_coil_current, :interface_velocity, :field_pressure, :field_pressure_f64_reeval)
 const SHORT = Dict(:diaphragm_velocity => "v_diaph", :voice_coil_current => "i_coil", :interface_velocity => "v_iface",
-                   :field_pressure => "p_field")
+                   :field_pressure => "p_field", :field_pressure_f64_reeval => "p_reeval(diag)")
 factors = Dict{Symbol,Float64}()
 println("\nper output (true error = complex relative error vs the fully Float64 build):")
 for o in outputs
     all_o = relative_entries(filter(r -> r.output == o, records))
     cal = filter(r -> r.f in calibration, all_o); hold = filter(r -> !(r.f in calibration), all_o)
     k = max(1.0, maximum(ratio, cal; init=0.0)); factors[o] = k
-    @printf("  %-19s entries %3d | max true %.3e | max estimate %.3e | false releases k=1: %d | calibrated k=%.3g on %d entries -> holdout false releases %d of %d (worst holdout true/estimate %.3g)\n",
+    @printf("  %-25s entries %3d | max true %.3e | max estimate %.3e | under-covered k=1: %d | calibrated k=%.3g on %d entries -> holdout under-covered %d of %d (worst holdout true/estimate %.3g)\n",
             o, length(all_o), maximum(r -> r.err, all_o; init=0.0), maximum(r -> isnan(r.estimate) ? 0.0 : r.estimate, all_o; init=0.0),
-            count(r -> released_wrongly(r, 1.0), all_o), k, length(cal), count(r -> released_wrongly(r, k), hold),
+            count(r -> under_covered(r, 1.0), all_o), k, length(cal), count(r -> under_covered(r, k), hold),
             length(hold), maximum(ratio, hold; init=0.0))
+    for t in THRESHOLDS
+        @printf("    threshold %.0e: true error >= threshold in %d entries; wrong releases k=1: %d, holdout k=%.3g: %d\n",
+                t, count(r -> r.err >= t, all_o), count(r -> wrong_release(r, 1.0, t), all_o), k,
+                count(r -> wrong_release(r, k, t), hold))
+    end
     zeros = filter(r -> r.output == o && r.zero_ref, records)
-    isempty(zeros) || @printf("    exact-zero references: %d, largest absolute error %.3e\n", length(zeros), maximum(r -> r.err, zeros))
+    isempty(zeros) || @printf("    exact-zero references: %d, largest absolute error %.3e %s\n", length(zeros),
+                              maximum(r -> r.err, zeros), UNIT[o])
 end
 println("\nseparately: resonances and cancellations (calibrated k per output as above):")
 for (name, pick) in (("resonance", r -> r.f in resonances), ("cancellation", cancellation),
@@ -162,9 +187,9 @@ for (name, pick) in (("resonance", r -> r.f in resonances), ("cancellation", can
         sel = relative_entries(filter(r -> r.output == o && pick(r), records))
         isempty(sel) && continue
         worst = sel[argmax([r.err for r in sel])]
-        @printf("  %-12s %-19s entries %3d | max true %.3e (%.0f Hz, split=%s, exc %d, #%d, estimate %.3e) | false releases k=1: %d, k=%.3g: %d\n",
+        @printf("  %-12s %-25s entries %3d | max true %.3e (%.0f Hz, split=%s, exc %d, #%d, estimate %.3e) | under-covered k=1: %d, k=%.3g: %d\n",
                 name, o, length(sel), worst.err, worst.f, worst.split, worst.exc, worst.i, worst.estimate,
-                count(r -> released_wrongly(r, 1.0), sel), factors[o], count(r -> released_wrongly(r, factors[o]), sel))
+                count(r -> under_covered(r, 1.0), sel), factors[o], count(r -> under_covered(r, factors[o]), sel))
     end
 end
 println("\nper frequency, max true error / max estimate over excitations, splits and entries:")
