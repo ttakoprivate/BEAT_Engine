@@ -3428,6 +3428,16 @@ function solve_request_impl(request; event_mode=false)
                         ),
                     )
                 elseif quantity == "interface_average_normal_velocity"
+                    if use_condensed_solver
+                        # step 2 of docs/ROADMAP.md (display only), timed outside field_s
+                        interface_error_started = time_ns()
+                        BeatEngineCoupledCondensed.interface_velocity_error_diagnostics!(field_error_diagnostics,
+                            coupled_system, String(output["id"]), [solution.interface_flux for solution in solutions],
+                            combined_interfaces.ranges, interface_averages.weights,
+                            BeatEngineCoupled.neumann_scale(density, FloatType(2pi) * frequency_hz),
+                            BeatEngineCoupled.neumann_scale(Float64(reference_density), 2pi * Float64(frequency_value)))
+                        field_error_s += (time_ns() - interface_error_started) / 1.0e9
+                    end
                     push!(quantities, quantity_wire(
                         output,
                         rows([interface_average_normal_velocity(
@@ -3934,7 +3944,8 @@ function solve_request_impl(request; event_mode=false)
                     diagnostics[key] = value
                 end
                 diagnostics["dense_output_recompute_float64"] = get(diagnostics, "dense_output_recompute_float64", false) ||
-                    get(field_error_diagnostics, "dense_output_recompute_float64_fields", false)
+                    get(field_error_diagnostics, "dense_output_recompute_float64_fields", false) ||
+                    get(field_error_diagnostics, "dense_output_recompute_float64_interface_velocities", false)
                 diagnostics["dense_output_field_error_s"] = field_error_s
             end
             result = Dict(

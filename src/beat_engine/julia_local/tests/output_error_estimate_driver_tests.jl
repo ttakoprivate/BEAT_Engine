@@ -21,6 +21,7 @@ quantity(result, id) = only(q for q in result["quantities"] if q["id"] == id)
 const FIELD = "ui:exterior-pressure"
 const SCALARS = ("diaphragm_velocity" => "mechanical:diaphragm-velocity",
                  "voice_coil_current" => "electrical:voice-coil-current")
+const INTERFACE = "acoustic:interface-average-normal-velocity"
 
 function workload(; tiny::Bool, precision::String="float32")
     request = JSON.parse(JSON.json(coupled_workload_request(; tiny)))
@@ -54,8 +55,16 @@ function check_estimates(d; hinted_everywhere::Bool=false)
         @test d["dense_output_recompute_float64_$(name)"] == [[!(v <= threshold) for v in only(values)]]
         any_hint |= any(only(d["dense_output_recompute_float64_$(name)"]))
     end
+    # Interface average normal velocity: [excitation][interface], finite and positive.
+    velocity = d["dense_output_estimated_relative_error_interface_velocity"][INTERFACE]
+    velocity_hints = d["dense_output_recompute_float64_interface_velocity"][INTERFACE]
+    @test length(velocity) == 1 && length(only(velocity)) == 1
+    @test all(v -> v isa Real && isfinite(v) && v > 0, only(velocity))
+    @test velocity_hints == [[!(v <= threshold) for v in only(velocity)]]
+    @test d["dense_output_recompute_float64_interface_velocities"] == any(only(velocity_hints))
+    any_hint |= any(only(velocity_hints))
     @test d["dense_output_recompute_float64"] == any_hint
-    hinted_everywhere && @test any_hint && all(only(hints))
+    hinted_everywhere && @test any_hint && all(only(hints)) && all(only(velocity_hints))
     return field
 end
 
@@ -86,9 +95,9 @@ max_relative(x, y) = maximum(abs.(x .- y) ./ abs.(y))
                         max_relative(decode(quantity(a, id)), decode(quantity(b, id))),
                         ", estimate = ", only(only(d["dense_output_estimated_relative_error_$(name)"])))
             end
-            id = "acoustic:interface-average-normal-velocity"
-            println("  $label $(a["freq_hz"]) Hz, 1 excitation: $id max complex rel. error = ",
-                    max_relative(decode(quantity(a, id)), decode(quantity(b, id))), " (no estimate)")
+            println("  $label $(a["freq_hz"]) Hz, 1 excitation: $INTERFACE max complex rel. error = ",
+                    max_relative(decode(quantity(a, INTERFACE)), decode(quantity(b, INTERFACE))), ", estimate = ",
+                    only(only(d["dense_output_estimated_relative_error_interface_velocity"][INTERFACE])))
         end
     end
 end

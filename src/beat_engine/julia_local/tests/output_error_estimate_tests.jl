@@ -735,3 +735,118 @@ end
     @test occursin("error_estimate_boundary = (combined_pressure, combined_neumann)", branch)
     @test occursin("boundary_data=error_estimate_boundary", branch)
 end
+
+# Step 2, interface average normal velocity: Σ w q / s from the stored flux.
+# Reference: Float64 LU of the same Float32-assembled system (DENSE_FLOAT64=1), averaged in Float64 with
+# the Float64 scale. The reference flux is itself stored as Complex{Float32}; that storage error
+# (≤ √2 u Σ|w||q_ref| / |s|) is subtracted from the measured difference, which keeps it a lower bound
+# of the true error of the estimated output.
+function oe_interface_truth(candidate, reference, ranges, weights, s_used, s64)
+    u = eps(Float32) / 2
+    [begin
+         q = ComplexF64.(reference[r]); w64 = Float64.(w)
+         v_ref = sum(w64 .* q) / s64
+         v = ComplexF64(ComplexF32(sum(w .* view(candidate, r)) / s_used))
+         stored = sqrt(2) * u / (1 - sqrt(2) * u) * sum(abs.(w64) .* abs.(q)) / abs(s64)
+         max(abs(v - v_ref) - stored, 0.0) / abs(v)
+     end for (r, w) in zip(ranges, weights)]
+end
+
+@testset "interface velocity estimate covers the solver error on the 2-kHz fixture (flux and no elimination)" begin
+    rng = MersenneTwister(2722)
+    for elimination in ("1", "0")
+        common = ("BLAB_COUPLED_TRANSDUCER_CONDENSATION" => "1", "BLAB_COUPLED_INTERFACE_FLUX_ELIMINATION" => elimination)
+        reference, reference_solutions, _ = oe_coupled(Float32, 2000.0, common...,
+            "BLAB_COUPLED_DENSE_REFINEMENT" => "0", "BLAB_COUPLED_DENSE_FLOAT64" => "1")
+        s32 = neumann_scale(reference.density, reference.omega)
+        s64 = neumann_scale(1.21, 2pi * 2000.0)
+        n = length(reference_solutions[1].interface_flux)
+        half = n ÷ 2
+        # one interface with uniform weights, two halves with random positive weights, and
+        # mixed-sign weights (cancellation in the average)
+        ranges = [1:n, 1:half, (half + 1):n, 1:n]
+        weights = [fill(1.0f0 / n, n), rand(rng, Float32, half), rand(rng, Float32, n - half),
+                   Float32.(randn(rng, n))]
+        try
+            for (split, solver) in (("auto", "lu"), ("0", "lu"), ("auto", "gmres"))
+                system, solutions, _ = oe_coupled(Float32, 2000.0, common..., "BLAB_COUPLED_DENSE_REFINEMENT" => "1",
+                    "BLAB_COUPLED_DENSE_FLOAT64" => "0", "BLAB_COUPLED_DENSE_SPLIT" => split,
+                    "BLAB_COUPLED_DENSE_SOLVER" => solver)
+                try
+                    fluxes = [x.interface_flux for x in solutions]
+                    estimates = OE.interface_velocity_error_estimates(system, fluxes, ranges, weights, s32, s64)
+                    @test size(estimates) == (length(ranges), 2)
+                    gmres = system.factorization isa OE.SplitGMRES && isnothing(system.factorization.fallback)
+                    if gmres
+                        @test all(isnan, estimates)
+                    else
+                        @test all(e -> isfinite(e) && e > 0, estimates)
+                        for j in 1:2
+                            truth = oe_interface_truth(fluxes[j], reference_solutions[j].interface_flux,
+                                                       ranges, weights, s32, s64)
+                            @test all(estimates[:, j] .>= truth)
+                            # worst-case perturbation within the stored flux bound, aligned with the
+                            # weights: its effect on the average is covered by the estimate
+                            store = OE._output_estimate_store(system.factorization)
+                            b = store.field_input_bounds.flux[:, j]
+                            for (i, (r, w)) in enumerate(zip(ranges, weights))
+                                v = ComplexF64(sum(w .* view(fluxes[j], r)) / s32)
+                                shift = sum(abs.(Float64.(w)) .* b[r]) / abs(ComplexF64(s32))
+                                @test shift <= estimates[i, j] * abs(v)
+                            end
+                            println("  interface velocity, elimination=$elimination split=$split, excitation $j: ",
+                                    "estimate ", estimates[:, j], ", lower bound of true error ", truth)
+                        end
+                    end
+                    diagnostics = withenv("BLAB_OUTPUT_ERROR_HINT" => nothing) do
+                        OE.interface_velocity_error_diagnostics!(Dict{String,Any}(), system, "iv", fluxes,
+                                                                 ranges, weights, s32, s64)
+                    end
+                    reported = diagnostics["dense_output_estimated_relative_error_interface_velocity"]["iv"]
+                    hints = diagnostics["dense_output_recompute_float64_interface_velocity"]["iv"]
+                    @test length(reported) == 2 && all(length(r) == length(ranges) for r in reported)
+                    @test gmres ? all(isnothing, reduce(vcat, reported)) : !any(isnothing, reduce(vcat, reported))
+                    @test gmres ? all(all, hints) : true
+                    @test diagnostics["dense_output_recompute_float64"] == any(any, hints)
+                    @test diagnostics["dense_output_recompute_float64_interface_velocities"] == any(any, hints)
+                    @test_throws ArgumentError OE.interface_velocity_error_estimates(system, fluxes[1:1], ranges,
+                                                                                     weights, s32, s64)
+                    @test_throws ArgumentError OE.interface_velocity_error_estimates(system, fluxes, ranges,
+                                                                                     weights[1:2], s32, s64)
+                    # phase inversion of the weights: same level, negated value, same estimate
+                    flipped = OE.interface_velocity_error_estimates(system, fluxes, ranges, [-w for w in weights], s32, s64)
+                    @test isequal(flipped, estimates)
+                    # a new solve of the factorization alone invalidates the stored bounds
+                    system.factorization \ ones(ComplexF64, size(system.factorization, 1))
+                    @test isnothing(OE.interface_velocity_error_estimates(system, fluxes, ranges, weights, s32, s64))
+                finally
+                    release_condensed_coupled_system!(system)
+                end
+            end
+        finally
+            release_condensed_coupled_system!(reference)
+        end
+    end
+end
+
+@testset "interface velocity estimate: a wrong scale is covered, a zero average gives Inf" begin
+    common = ("BLAB_COUPLED_TRANSDUCER_CONDENSATION" => "1", "BLAB_COUPLED_INTERFACE_FLUX_ELIMINATION" => "1",
+              "BLAB_COUPLED_DENSE_REFINEMENT" => "1", "BLAB_COUPLED_DENSE_FLOAT64" => "0")
+    system, solutions, _ = oe_coupled(Float32, 2000.0, common...)
+    try
+        fluxes = [x.interface_flux for x in solutions]
+        n = length(fluxes[1]); ranges = [1:n]; weights = [fill(1.0f0 / n, n)]
+        s64 = neumann_scale(1.21, 2pi * 2000.0)
+        exact = OE.interface_velocity_error_estimates(system, fluxes, ranges, weights, ComplexF32(s64), s64)
+        # a scale 1e-3 off must show up as at least 1e-3 relative error
+        off = OE.interface_velocity_error_estimates(system, fluxes, ranges, weights, ComplexF32(s64 * (1 + 1e-3)), s64)
+        @test all(off .>= 1e-3 * (1 - 1e-6)) && all(off .> exact)
+        # weights summing a flux to exactly zero: a zero value with a nonzero bound is Inf (hint)
+        zero_flux = [zero(f) for f in fluxes]
+        zero_estimates = OE.interface_velocity_error_estimates(system, zero_flux, ranges, weights, ComplexF32(s64), s64)
+        @test all(isinf, zero_estimates)
+        @test_throws ArgumentError OE.interface_velocity_error_estimates(system, fluxes, ranges, weights, 0.0f0im, s64)
+    finally
+        release_condensed_coupled_system!(system)
+    end
+end

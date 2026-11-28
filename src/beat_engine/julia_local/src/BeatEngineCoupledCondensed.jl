@@ -524,7 +524,9 @@ function _field_input_bounds(system, dense_solution::AbstractMatrix, bound::Abst
         neumann_bound .+= sqrt(2.0) * u * (width + 1) .* magnitude
     end
     pressure_bound = bem_bound .+ sqrt(2.0) * u .* pressure
-    return (pressure=pressure_bound, neumann=neumann_bound)
+    # `flux`: absolute bound of the interface flux before it is stored as Complex{T} (the storage
+    # rounding is added by `interface_velocity_error_estimates`, which sees the stored values)
+    return (pressure=pressure_bound, neumann=neumann_bound, flux=Matrix{Float64}(flux_bound))
 end
 
 function _store_field_input_bounds!(system, dense_solution, interface_flux; flux_rhs=nothing)
@@ -755,6 +757,116 @@ function _output_estimate_diagnostics(system)
     end
     diagnostics["dense_output_recompute_float64"] =
         any(output_recompute_hint(v, threshold) for m in values(estimates) for v in m)
+    return diagnostics
+end
+
+"""
+    interface_velocity_error_estimates(system, interface_flux, ranges, weights, scale, reference_scale)
+        -> Union{Nothing,Matrix{Float64}}
+
+Estimated complex relative solver error of the area-averaged interface normal velocity
+`v_i = Σ_{r ∈ ranges[i]} w_r q̂_r / ŝ` (`interface_average_normal_velocity`) of the last coupled solve,
+`interfaces × excitations` (step 2 of docs/ROADMAP.md, display only). `interface_flux[j]` is the stored
+Complex{scalar_type} flux of excitation `j` as the driver averages it, `weights[i]` the weights of
+interface `i`, `scale` the Neumann scale as used (`neumann_scale` in the scalar type) and
+`reference_scale` the same scale in Float64 from the Float64 density and the requested frequency (so the
+rounding of the scale is included). With `b_r` the stored
+absolute flux bound (`_field_input_bounds`, before storage), `u` the unit roundoff of the scalar type and
+`γ_m = m u₆₄ / (1 − m u₆₄)` in Float64, the error of the computed sum `Σ̂_i` against the exact
+`Σ_r w_r q_r` is bounded by
+
+    A_i = Σ_r |w_r| (b_r + c |q̂_r|) + |Σ̂_i − S_i| + √2 γ_n Σ_r |w_r| |q̂_r|,   c = √2 u / (1 − √2 u),
+
+where `S_i` is the same sum of the stored values in Float64 (the products of scalar-type values are exact
+in Float64, so only its running sum rounds, `n = |ranges[i]|`). The rounding of the averaging is thus
+measured a posteriori rather than bounded by the worst case `γ_n` of the scalar type, which would be
+far larger on interfaces with many entries. With `D_i = Σ̂_i / ŝ` in Float64 and `v̂_i` the average as stored (Complex{scalar_type}), the bound of
+`|v̂_i − v_i|` is
+
+    |v̂_i − D_i| + √2 γ_4 |D_i| + A_i / |ŝ| + (Σ_r |w_r| |q̂_r| + A_i) |ŝ − s| / (|ŝ| |s|),
+
+divided by `|v̂_i|`; `NaN` = unknown (no componentwise bound, or a flux bound that is unknown, e.g. GMRES
+without fallback), `Inf` where `v̂_i` is zero but its bound is not. Not included: the rounding of the
+weights (interface areas) to the scalar type, which belongs to the geometry and assembly error of step 4.
+Returns `nothing` when the factorization keeps no bounds.
+"""
+function interface_velocity_error_estimates(system, interface_flux, ranges, weights, scale, reference_scale)
+    store = _output_estimate_store(system.factorization)
+    (isnothing(store) || !hasproperty(store, :field_input_bounds)) && return nothing
+    bounds = store.field_input_bounds
+    (isnothing(bounds) || !hasproperty(bounds, :flux)) && return nothing
+    excitations = size(bounds.flux, 2)
+    length(interface_flux) == excitations ||
+        throw(ArgumentError("interface_flux has $(length(interface_flux)) excitations, the last solve $excitations"))
+    length(weights) == length(ranges) ||
+        throw(ArgumentError("$(length(weights)) weight vectors for $(length(ranges)) interfaces"))
+    T = system.scalar_type
+    u = Float64(eps(T)) / 2
+    u64 = eps(Float64) / 2
+    gamma64(m) = m * u64 / (1 - m * u64)
+    store_rounding = sqrt(2.0) * u / (1 - sqrt(2.0) * u)
+    s_hat = ComplexF64(scale); s = ComplexF64(reference_scale)
+    (iszero(s_hat) || iszero(s)) && throw(ArgumentError("the Neumann scale is zero"))
+    scale_term = abs(s_hat - s) / (abs(s_hat) * abs(s))
+    estimates = fill(NaN, length(ranges), excitations)
+    for j in 1:excitations
+        flux = interface_flux[j]
+        length(flux) == size(bounds.flux, 1) ||
+            throw(ArgumentError("interface_flux[$j] has $(length(flux)) entries, the stored bound $(size(bounds.flux, 1))"))
+        for (i, (range, w)) in enumerate(zip(ranges, weights))
+            length(w) == length(range) ||
+                throw(ArgumentError("interface $i: $(length(w)) weights for $(length(range)) flux entries"))
+            b = view(bounds.flux, range, j)
+            any(isnan, b) && continue                                    # unknown
+            stored = view(flux, range)
+            q = abs.(ComplexF64.(stored)); aw = abs.(Float64.(w))
+            magnitude = sum(aw .* q; init=0.0)
+            # as the driver computes it (interface_average_normal_velocity), in the stored types
+            isempty(range) && continue                                   # no entries: unknown
+            computed_sum = sum(w .* stored)
+            computed = computed_sum / scale
+            # the driver stores the average as Complex{T} (`rows`); exact when it already is one
+            output = Complex{T}(computed)
+            reference_sum = sum(ComplexF64.(w) .* ComplexF64.(stored); init=zero(ComplexF64))
+            absolute_sum = sum(aw .* (b .+ store_rounding .* q); init=0.0) +
+                           abs(ComplexF64(computed_sum) - reference_sum) + sqrt(2.0) * gamma64(length(range)) * magnitude
+            quotient = ComplexF64(computed_sum) / s_hat
+            value = abs(ComplexF64(output))
+            absolute = abs(ComplexF64(output) - quotient) + sqrt(2.0) * gamma64(4) * abs(quotient) +
+                       absolute_sum / abs(s_hat) + (magnitude + absolute_sum) * scale_term
+            estimates[i, j] = iszero(absolute) ? 0.0 : iszero(value) ? Inf : absolute / value
+        end
+    end
+    return estimates
+end
+
+"""
+    interface_velocity_error_diagnostics!(diagnostics, system, output_id, interface_flux, ranges, weights,
+                                          scale, reference_scale) -> diagnostics
+
+Driver wiring of `interface_velocity_error_estimates` for one `interface_average_normal_velocity` output
+(display only). Adds, keyed by `output_id`: `dense_output_estimated_relative_error_interface_velocity`
+(`excitation → interface`, `null` = unknown) and `dense_output_recompute_float64_interface_velocity`, and
+ORs the hints into `dense_output_recompute_float64_interface_velocities` and
+`dense_output_recompute_float64`. Nothing is added when the last solve keeps no bounds.
+"""
+function interface_velocity_error_diagnostics!(diagnostics::AbstractDict, system, output_id::AbstractString,
+                                               interface_flux, ranges, weights, scale, reference_scale)
+    factorization = hasproperty(system, :factorization) ? system.factorization : nothing
+    isnothing(factorization) && return diagnostics
+    estimates = interface_velocity_error_estimates(system, interface_flux, ranges, weights, scale, reference_scale)
+    isnothing(estimates) && return diagnostics
+    threshold = _output_error_hint_threshold()
+    hints = [[output_recompute_hint(v, threshold) for v in view(estimates, :, j)] for j in axes(estimates, 2)]
+    get!(diagnostics, "dense_output_estimated_relative_error_interface_velocity", Dict{String,Any}())[String(output_id)] =
+        [Union{Nothing,Float64}[isnan(v) ? nothing : (isinf(v) ? floatmax(Float64) : v) for v in view(estimates, :, j)]
+         for j in axes(estimates, 2)]
+    get!(diagnostics, "dense_output_recompute_float64_interface_velocity", Dict{String,Any}())[String(output_id)] = hints
+    diagnostics["dense_output_error_hint_threshold"] = threshold
+    hinted = any(any, hints)
+    diagnostics["dense_output_recompute_float64_interface_velocities"] =
+        get(diagnostics, "dense_output_recompute_float64_interface_velocities", false) || hinted
+    diagnostics["dense_output_recompute_float64"] = get(diagnostics, "dense_output_recompute_float64", false) || hinted
     return diagnostics
 end
 
