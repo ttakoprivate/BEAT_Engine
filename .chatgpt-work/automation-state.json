@@ -21,22 +21,22 @@
     22
   ],
   "lease": {
-    "holder": "work28-09-mx04iabs",
-    "acquired_at": "2026-11-28T08:03:18.856Z",
-    "expires_at": "2026-11-28T09:33:18.856Z",
+    "holder": null,
+    "acquired_at": null,
+    "expires_at": null,
     "fencing_token": 36
   },
   "last_completed_run": {
-    "id": "work27-22-mwzgsfuj",
-    "started_at": "2026-11-27T20:59:21.787Z",
-    "completed_at": "2026-11-27T21:07:58.050Z",
-    "status": "output_error_driver_tests_verified",
+    "id": "work28-09-mx04iabs",
+    "started_at": "2026-11-28T08:03:18.856Z",
+    "completed_at": "2026-11-28T08:15:13.905Z",
+    "status": "interface_velocity_storage_underflow_reproduced",
     "source_commit": "b34abee291207a13876068c99948d8ca386756fa",
     "checked_heads": {
       "9": "3d639cef853f6c60caa36fda4a8b39f28baec3f7",
       "14": "b2b756da7076cab3b32a63c822ec91af36a7e6ce",
       "19": "7afbaf4b3d88b1f15e39c12ab9a2a47473b336c9",
-      "22": "7dec08dc741018217a4403042a5208cd4a25cc91",
+      "22": "40adbc20c62826d09a8b9c36cfe46bfd3d5ac8d4",
       "23": "a6967725cb95f270c494611c0342019e2dad4d91"
     },
     "source_changes": false,
@@ -44,19 +44,19 @@
     "actions": [
       {
         "pr": 22,
-        "commit": "7dec08dc741018217a4403042a5208cd4a25cc91",
-        "review_id": 6093362445,
-        "url": "https://github.com/ttakoprivate/BEAT_Engine/pull/22#pullrequestreview-6093362445",
-        "review_state": "COMMENT"
+        "commit": "40adbc20c62826d09a8b9c36cfe46bfd3d5ac8d4",
+        "review_id": 6096705338,
+        "url": "https://github.com/ttakoprivate/BEAT_Engine/pull/22#pullrequestreview-6096705338",
+        "review_state": "REQUEST_CHANGES"
       }
     ],
-    "evidence": "Fresh clone T2100/new officialJulia1.12.6 checked officialSHA256/newdepot instantiate exit0. Diff parent caa6b59 only new output_error_estimate_driver_tests.jl+runtests include. OPENBLAS_NUM_THREADS1 JULIA_DEPOT_PATHnew Julia --threads1 --startup-file=no --project=src/beat_engine/julia_local review_2722.jl exit0:56+73 repository+20own tightscalarhint/finite/nonzero controls=149different pass0skip/Broken. Actual JSON driver F32/F64 tiny500/1000+fixture2000, negativeweight exactphaseinvert, threshold1e-12, F64noF32estimate. Pointwisecomplexrelative peroutput 500/1000/2000:pressuremax4.8028241e-7/5.4800439e-6/1.7595077e-6 Pa;membranevelocity1.2807097e-7/5.6189766e-7/8.3815229e-8m/s;current1.1383922e-8/3.5149774e-8/1.7591798e-8A;interfacevelocity2.2582112e-7/4.6035575e-6/6.7288025e-7m/s;oneexc noexactreferencezeros. Scalarvelocityfullerror/estimate1.52/6.62tiny;6fieldpointscoveredminreserve1.22fixtureP2. Comparison changes assembly+solve, cannot causallyattributeallundercoverage solelyassembly. Existingdenseengine reference notindependentphysical. No fullgate/algebraicretests/Python/GPU/h343/performance/overallapproval. Clean source/nobaselinechanges.",
+    "evidence": "Fresh clone T0803/new officialJulia1.12.6 checked officialSHA256/newdepot instantiate exit0. Final review_2809.jl --threads1 --startup-file=no --project=src/beat_engine/julia_local exit0:1076repository output_error_estimate_tests in23sets incl116+3new plus8own actualmodule counterexample/JSONhintcontrols. Driver suite exit0 68+89=157, final1241checks0skip/Broken. Preparatory AST13controls exit0 notadded. Initialfullharness exit1 missingCore setup, ownimports correctedonly. NewP2 source807/831relative flux storage rounding misses subnormals. Syntheticbefore0.6eta or1.4eta(eta=minsubnormalF32),qhat=eta,weights1f0,scalei1exact,b0: actualestimate8.429370491e-8,absbound1.181206392e-52m/s vs256bitBigFloat trueabs5.605193857e-46m/s;pointwisecomplexrel againstref.6666666667/.2857142857, nozeros; actualdiagnosticthreshold1e-3hintfalse/globalfalse. ActualmoduleNamedTupleboundstoreprobe, notcoupledh343failure. Normal interface driver oneexc500/1000/2000 estimate2.43625196e-6/1.92778675e-6/6.39446583e-7;fullFloat32/64pointwiserel2.25821118e-7/4.60355747e-6/6.72880253e-7,noexactzeros. Thisdriverreference sameengine notindependentphysical/assemblyisolation. Existingtests onlylowerboundtruth notupperaccuracyproof. Clean source/nobaselinechanges. No fullstandalonereferencegate/Python/GPU/h343/performance/overallapproval.",
     "pending": [
       "PR14 N1/N2b2b756d awaits independent follow-up;row-quadrature/adjoint review and h343 qualification open.",
       "PR19 numerical/export findings and owner split/merge decision open;three ROM fixes verified.",
       "Issue12 VACS sample/format answers pending;PR17 merged;PR9 roadmap update planned.",
       "PR23 a696772 own null-hook P2 verified fixed6092007765. Source-worker auto-loading, external labels, maxiter250, per-frequency reset and A-BLASfailure verified 178tests. Cfinally source-only; bundle/largerH/referencegate/GPU/h343 qualifications remain. No overallapproval.",
-      "PR22 7dec08d tests-only E2E driver extension independently verified6093362445 149tests. caa6b59 projectionfix remains verified. Tiny membrane fullFloat32/64error exceedsestimate1.52/6.62, no causalassemblyisolation by this test. Norm/masssolve/assembly/hardware limits remain,nooverallapproval."
+      "PR22 40adbc2 new interface velocity display estimate P2 storage-subnormal undercoverage/false-negative hint reproduced6096705338;awaitauthorfix. 1076algebraic+157driver pass,8actualmodule controls reproduce. Priorprojection/synthesis/timingfixes remainverified. No overallqualification."
     ],
     "continuation": "Continue new or independently actionable work only. Do not repeat unchanged findings, acknowledgments, owner questions. Normal external review/data/hardware waits do not pause routine."
   },
